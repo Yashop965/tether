@@ -17,15 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 def _settings(ctx) -> Mapping[str, Any]:
-    """Read ``plugins.entries.<tether>`` from the plugin's own profile config."""
-    try:
-        from hermes_cli.config import load_config
-        from hermes_cli.plugins_state import _plugin_settings_entry
-        cfg = load_config() or {}
-    except Exception:
-        cfg = {}
-    entry = _plugin_settings_entry(cfg, ctx.plugin_id)
-    return dict(entry or {})
+    """Read this plugin's config keys through the documented ``ctx.get_config``
+    (``plugins.entries.<plugin_id>.settings`` subtree, per key)."""
+    out: dict[str, Any] = {}
+    for key in ("disabled", "allow_gateway_injection", "token", "host",
+                "port", "stt_model", "idle_seconds", "session_key"):
+        try:
+            value = ctx.get_config(key, None)
+        except Exception:
+            value = None
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def _gen_token(settings: Mapping[str, Any], ctx) -> str:
@@ -49,7 +52,7 @@ def register(ctx) -> None:
     if settings.get("disabled"):
         logger.info("tether: disabled by settings")
         return
-    if str(settings.get("allow_gateway_injection") is True) == "False":
+    if settings.get("allow_gateway_injection") is not True:
         # voice-to-session needs this; warn, don't block (mouse still works)
         logger.warning(
             "tether: set plugins.entries.%s.allow_gateway_injection: true "
