@@ -188,21 +188,23 @@ fun ControlScreen() {
             )
             Spacer(Modifier.weight(1f))
             Text(if (up) "LINKED" else "OFFLINE", color = if (up) Dim else Faint, fontSize = 9.sp, letterSpacing = 2.sp)
-            Spacer(Modifier.width(14.dp))
-            // stop / resume
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(width = 1.dp, color = if (paused) Color.White else Color(0xFF333333))
-                    .background(if (paused) Color.White else Color.Black)
-                    .clickable {
-                        if (!paused) { ws.send(TetherWs.PAUSE); paused = true }
-                        else { ws.send(TetherWs.RESUME); paused = false }
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("■", color = if (paused) Color.Black else Dim, fontSize = 14.sp)
+            if (up) {
+                Spacer(Modifier.width(14.dp))
+                // stop / resume the laptop cursor gate (only makes sense while linked)
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(width = 1.dp, color = if (paused) Color.White else Color(0xFF333333))
+                        .background(if (paused) Color.White else Color.Black)
+                        .clickable {
+                            if (!paused) { ws.send(TetherWs.PAUSE); paused = true }
+                            else { ws.send(TetherWs.RESUME); paused = false }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(if (paused) "ON" else "OFF", color = if (paused) Color.Black else Dim, fontSize = 9.sp, letterSpacing = 1.sp)
+                }
             }
         }
 

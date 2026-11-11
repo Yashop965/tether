@@ -55,8 +55,13 @@ def run_netsh_admin(argv: list[str]) -> str:
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=False, timeout=120)
     time.sleep(1.5)
     if os.path.exists(out):
-        with open(out, encoding="utf-8", errors="replace") as f:
-            txt = f.read().strip()
+        raw = open(out, "rb").read()
+        # netsh on Windows writes UTF-16; fall back to UTF-8
+        try:
+            txt = raw.decode("utf-16")
+        except UnicodeDecodeError:
+            txt = raw.decode("utf-8", errors="replace")
+        txt = txt.strip()
         try:
             os.remove(out)
         except OSError:
@@ -94,7 +99,7 @@ def main() -> int:
 
     print(f"[1/3] status: {hosted_status()[:120]}", flush=True)
     print(f"[2/3] configuring SSID={ssid} PSK=***")
-    print(run_netsh_admin(["wlan", "set", "hostednetwork", "set", f"ssid={ssid}", f"key={psk}"]) or "(elevated netsh done)")
+    print(run_netsh_admin(["wlan", "set", "hostednetwork", f"ssid={ssid}", f"key={psk}", "keyUsage=temporary"]) or "(elevated netsh done)")
     print(f"[3/3] starting hosted network…")
     out = run_netsh_admin(["wlan", "start", "hostednetwork"])
     print(out or "(elevated netsh done)")

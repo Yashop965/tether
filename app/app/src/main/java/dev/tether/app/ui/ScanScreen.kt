@@ -116,6 +116,12 @@ fun ScanScreen(onQr: (String) -> Unit, onCancel: () -> Unit) {
                     analysis = a
                     val pv = Preview.Builder().build()
                     p.bindToLifecycle(lifecycle, CameraSelector.DEFAULT_BACK_CAMERA, pv, a)
+                    // deliver the preview surface once the view is attached —
+                    // PreviewView owns its provider internally; without this the
+                    // Preview use case has no target and the stream stays IDLE
+                    previewView.post {
+                        runCatching { pv.setSurfaceProvider(previewView.getSurfaceProvider()) }
+                    }
                     // make the stream state visible: STARTED = frames flowing
                     val observer = androidx.lifecycle.Observer<androidx.camera.view.PreviewView.StreamState> { st ->
                         when (st) {
