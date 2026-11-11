@@ -4,7 +4,10 @@ register(ctx):
   * starts the LAN bridge (WebSocket) in a daemon thread,
   * exposes the ``tether_status`` tool (agent sees phone state / transcripts),
   * exposes ``/tether-pause`` and ``/tether-status`` in-session commands,
-  * exposes ``hermes tether show`` in the CLI (prints the pairing URL).
+  * exposes the CLI:
+      hermes tether show     — pairing targets + token + QR (+ live cloud URLs)
+      hermes tether hotspot  — start the Windows hotspot for phone auto-join
+      hermes tether tunnel   — Cloudflare quick tunnels (remote/any-network mode)
 """
 from __future__ import annotations
 

@@ -32,6 +32,7 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any, Mapping
 
 from .mouse import MouseDriver
@@ -134,7 +135,15 @@ class TetherServer:
         return f"tether: unknown argument {arg!r} (on|off|status)"
 
     def _cli_setup(self, parser: Any) -> None:
-        parser.add_argument("sub", choices=["show"], help="show pairing targets + QR")
+        parser.add_argument(
+            "sub",
+            choices=["show", "hotspot", "tunnel"],
+            help=(
+                "show = pairing targets + QR; "
+                "hotspot = start the Windows Wi-Fi hotspot the phone auto-joins; "
+                "tunnel = Cloudflare quick tunnels (remote mode, works from any network)"
+            ),
+        )
 
     # ------------------------------------------------------------ candidates
     @staticmethod
@@ -195,6 +204,13 @@ class TetherServer:
         return ded
 
     def _cli_show(self, args: Any) -> None:
+        sub = getattr(args, "sub", "show")
+        if sub == "hotspot":
+            self._cli_hotspot(args)
+            return
+        if sub == "tunnel":
+            self._cli_tunnel(args)
+            return
         cands = self._candidates()
         if not cands:
             cands = [{"kind": "local", "ip": "127.0.0.1", "name": "loopback"}]
@@ -215,6 +231,167 @@ class TetherServer:
             print("\nScan with the Tether app's camera to pair in one tap.")
         except ImportError:
             print("(install 'qrcode' for QR output: pip install qrcode)")
+        # live cloud tunnels (if `hermes tether tunnel` was run) — show remote
+        try:
+            tun = json.loads(Path(self._data_dir() + "/tunnels.json").read_text(encoding="utf-8"))
+            if tun.get("bridge"):
+                print(f"\nREMOTE (any network) pairing: wss://{tun['bridge'].split('https://', 1)[-1]}")
+            if tun.get("upd"):
+                print(f"REMOTE app updates:           {tun['upd']}")
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------- data dir
+    def _data_dir(self) -> str:
+        try:
+            return str(self.ctx.plugin_data_dir())
+        except Exception:
+            import tempfile
+
+            return tempfile.gettempdir()
+
+    # ------------------------------------------------------------ hotspot
+    def _cli_hotspot(self, args: Any) -> None:
+        """Start the laptop's Wi-Fi hotspot (UAC), print SSID/PSK, and refresh
+        the pairing page so the phone's Tether app auto-joins Wi-Fi + bridge."""
+        import secrets
+        import subprocess
+
+        check = subprocess.run(
+            ["netsh", "wlan", "show", "drivers"], capture_output=True, text=True
+        ).stdout.lower()
+        if "hosted network: yes" not in check and "hosted network supported" not in check:
+            print("this Wi-Fi adapter does not support a hosted network — use `hermes tether tunnel` instead")
+            return
+
+        ssid = f"Tether-{secrets.token_hex(2).upper()}"
+        psk = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(10))
+        print(f"configuring hotspot SSID={ssid} — accept the UAC prompt(s) below")
+
+        def netsh_admin(argv: list[str]) -> str:
+            import os
+            import time as _time
+
+            tag = secrets.token_hex(4)
+            out = os.path.join(os.environ.get("TEMP", "."), f"tether_netsh_{tag}.txt")
+            inner = " ".join(argv) + ' > "' + out + '" 2>&1'
+            ps = "Start-Process powershell -ArgumentList '-NoProfile','-Command','" + inner + "' -Verb RunAs -Wait"
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], timeout=120, check=False)
+            _time.sleep(1.5)
+            if os.path.exists(out):
+                raw = open(out, "rb").read()
+                try:
+                    return raw.decode("utf-16").strip()
+                except UnicodeDecodeError:
+                    return raw.decode("utf-8", errors="replace").strip()
+            return ""
+
+        out1 = netsh_admin(
+            ["netsh", "wlan", "set", "hostednetwork", f"ssid={ssid}", f"key={psk}", "keyUsage=temporary"]
+        )
+        if out1 and "not a valid" in out1.lower():
+            print(f"netsh configure failed: {out1[:200]}")
+            return
+        out2 = netsh_admin(["netsh", "wlan", "start", "hostednetwork"])
+        if "already" in out2.lower():
+            out2 = "already running"
+        print(f"hotspot up: SSID={ssid}  PSK={psk}")
+        print("refreshing the pairing page with the HOTSPOT QR…")
+        self._regen_pairing_page(ssid=ssid, psk=psk)
+        print("on the phone: Tether app → SCAN QR → HOTSPOT card → one tap (Wi-Fi + bridge).")
+
+    def _regen_pairing_page(self, ssid: str | None = None, psk: str | None = None) -> None:
+        """Run tools/pairing_serve.py when present (repo dev layout)."""
+        import subprocess
+        import sys as _sys
+
+        here = Path(__file__).resolve().parent
+        script = here.parent / "tools" / "pairing_serve.py"
+        if not script.exists():
+            print("(pairing-page tool not found next to the plugin — skipped)")
+            return
+        cmd = [_sys.executable, str(script)]
+        if ssid and psk:
+            cmd += ["--ssid", ssid, "--psk", psk]
+        try:
+            tun = json.loads(Path(self._data_dir() + "/tunnels.json").read_text(encoding="utf-8"))
+            if tun.get("bridge"):
+                cmd += ["--wss", "wss://" + tun["bridge"].split("https://", 1)[-1]]
+            if tun.get("upd"):
+                cmd += ["--upd", tun["upd"]]
+        except Exception:
+            pass
+        try:
+            subprocess.run(cmd, timeout=60, check=False)
+        except Exception as e:  # noqa: BLE001
+            print(f"pairing page regen failed: {e}")
+
+    # ------------------------------------------------------------- tunnel
+    def _cli_tunnel(self, args: Any) -> None:
+        """Cloudflare quick tunnels: bridge (WS) + update server; print the
+        remote URLs and refresh the pairing page. URLs are ephemeral — rerun
+        any time, and `hermes tether show` will pick them up automatically."""
+        import re
+        import shutil
+        import subprocess
+        import sys as _sys
+
+        cfd = None
+        for cand in (Path.home() / "tools" / "cloudflared.exe", shutil.which("cloudflared")):
+            if cand and Path(str(cand)).exists():
+                cfd = Path(str(cand))
+                break
+        if cfd is None:
+            print("cloudflared not found — download from https://github.com/cloudflare/cloudflared/releases")
+            print(f"(expected at {Path.home() / 'tools' / 'cloudflared.exe'})")
+            return
+
+        def wait_url(logpath: Path, prev: str, timeout: int = 90) -> str | None:
+            import time as _time
+
+            deadline = _time.time() + timeout
+            url = None
+            while _time.time() < deadline:
+                try:
+                    txt = logpath.read_text(encoding="utf-8", errors="replace")
+                    for m in reversed(list(re.finditer(r"https://[a-z0-9-]+\.trycloudflare\.com", txt))):
+                        url = m.group(0)
+                except FileNotFoundError:
+                    pass
+                if url and url != prev:
+                    return url
+                _time.sleep(3)
+            return None
+
+        logdir = Path(self._data_dir())
+        urls: dict[str, str] = {}
+        for label, origin, logf in (
+            ("bridge", f"http://127.0.0.1:{self.port}", logdir / "cloudflared_bridge.log"),
+            ("upd", "http://127.0.0.1:8400", logdir / "cloudflared_upd.log"),
+        ):
+            try:
+                logf.write_text("", encoding="utf-8")
+            except OSError:
+                continue
+            subprocess.Popen(
+                [str(cfd), "tunnel", "--url", origin, "--no-autoupdate"],
+                stdout=open(logf, "a", encoding="utf-8", errors="replace"),
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+            u = wait_url(logf, "")
+            if u:
+                urls[label] = u
+        if not urls:
+            print("tunnel(s) failed to register — check internet connectivity")
+            return
+        (logdir / "tunnels.json").write_text(json.dumps(urls, indent=2), encoding="utf-8")
+        for k, v in urls.items():
+            print(f"{k:>6} tunnel: {v}")
+        if "bridge" in urls:
+            print(f"\nREMOTE pairing:  wss://{urls['bridge'].split('https://', 1)[-1]}")
+        self._regen_pairing_page()
+        print("tunnels keep running in the background — rerun to get fresh URLs (they are ephemeral).")
 
     # ---------------------------------------------------------------- start
     def start(self) -> None:
