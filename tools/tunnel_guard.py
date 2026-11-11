@@ -106,8 +106,11 @@ def regen_pairing(urls: dict) -> None:
         log(f"pairing regen failed: {e}")
 
 
-def alive(origin: str) -> bool:
-    """True if a cloudflared process exists whose command line serves [origin]."""
+def alive(origin: str, url: str) -> bool:
+    """Process alive AND the quick-tunnel URL actually answers.
+
+    Quick tunnels get kicked by Cloudflare while the cloudflared process
+    keeps running (zombie) — an answer-check is the only real liveness."""
     pat = re.escape(origin)
     ps = (
         "(Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\") | "
@@ -120,9 +123,36 @@ def alive(origin: str) -> bool:
         capture_output=True, text=True, timeout=30,
     )
     try:
-        return int(r.stdout.strip().splitlines()[-1]) > 0
+        proc_alive = int(r.stdout.strip().splitlines()[-1]) > 0
+    except Exception:  # noqa: BLE001
+        proc_alive = False
+    if not proc_alive or not url:
+        return False
+    import urllib.error
+    import urllib.request
+    try:
+        code = urllib.request.urlopen(url, timeout=10).getcode()
+        return code is not None
+    except urllib.error.HTTPError as e:
+        # 4xx/4xx-ish from Cloudflare still means the tunnel registered
+        return e.code < 500 or e.code in (426, 404)
     except Exception:  # noqa: BLE001
         return False
+
+
+def kill_for_origin(origin: str) -> None:
+    pat = re.escape(origin)
+    ps = (
+        "(Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\") | "
+        "ForEach-Object { $_.CommandLine } | Where-Object { $_ -and $_ -match '"
+        + pat
+        + "' } | ForEach-Object { "
+        "Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\" | "
+        "Where-Object { $_.CommandLine -match '" + pat + "' } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                   capture_output=True, timeout=30, check=False)
 
 
 def main() -> int:
@@ -140,11 +170,13 @@ def main() -> int:
 
     while True:
         time.sleep(30)
-        for key, url in list(urls.items()):
-            if alive(TARGETS[key][0]):
+        for key in list(urls):
+            if alive(TARGETS[key][0], urls[key]):
                 continue
-            log(f"{key} tunnel died — restarting")
-            new = spawn(key, url)
+            log(f"{key} tunnel dead (process or URL) — force restarting")
+            kill_for_origin(TARGETS[key][0])
+            time.sleep(2)
+            new = spawn(key, urls[key])
             if new:
                 urls[key] = new
                 write_state(urls)
