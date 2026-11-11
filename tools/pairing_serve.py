@@ -5,19 +5,27 @@ Writes into tools/apkserve/ (served on port 8400 next to the update files):
     qr_<label>.png— the QR images themselves
 
 QR payload: tether://pair?h=<host>&p=<port>&t=<token>
+Options:
+    n=<ssid>&k=<psk>  — the app auto-joins the laptop's hotspot first
+    r=wss://...       — remote mode: phone dials the cloud tunnel URL instead
+                         of a LAN IP (WS-only; no UDP fast channel)
 The Tether app handles the tether:// scheme: scan (in-app) or tap a shared
 link -> fields fill -> auto-connect. No typing on the phone.
 
 Usage:
     python tools/pairing_serve.py [--token TOKEN] [--port 8377]
+                                   [--ssid Tether-AB --psk secret]
+                                   [--wss wss://xxxx.trycloudflare.com]
 Hosts are auto-detected: Tailscale IP (if the tailnet is up) + first LAN IP.
 """
 from __future__ import annotations
 
 import argparse
 import html
+import ipaddress
+import re
 import socket
-import urllib.request
+import subprocess
 from pathlib import Path
 
 import qrcode
@@ -53,17 +61,37 @@ def lan_ip() -> str | None:
             return None
 
 
+def hotspot_ip() -> str | None:
+    """IP of the Windows hosted-network interface (192.168.137.x)."""
+    try:
+        out = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        m = re.match(r"(?i)^\s*IPv4 Address.*:\s*([\d.]+)", line)
+        if not m:
+            continue
+        ip = m.group(1)
+        if ipaddress.ip_address(ip) in ipaddress.ip_network("192.168.137.0/24"):
+            return ip
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--token", default=None, help="bridge token (default: read from bridge config or env TETHER_TOKEN)")
     ap.add_argument("--port", default="8377")
+    ap.add_argument("--ssid", default=None, help="add a HOTSPOT QR that carries n=<ssid> for auto-join")
+    ap.add_argument("--psk", default=None, help="hotspot passphrase (used with --ssid)")
+    ap.add_argument("--wss", default=None, help="add a REMOTE QR carrying r=<wss url> (cloud tunnel)")
+    ap.add_argument("--upd", default=None, help="cloud update-server base (https://…) — added as u= to the REMOTE QR")
     args = ap.parse_args()
 
     import os
     token = args.token or os.environ.get("TETHER_TOKEN") or "785b68b042cb4842"
 
     hosts = [h for h in [tailscale_ip(), lan_ip()] if h]
-    if not hosts:
+    if not hosts and not args.ssid and not args.wss:
         print("no candidate host found", flush=True)
         return 1
 
@@ -72,12 +100,28 @@ def main() -> int:
     for i, host in enumerate(hosts):
         label = "TAILNET" if i == 0 and host.startswith("100.") else "LAN"
         payload = f"tether://pair?h={host}&p={args.port}&t={token}"
+        cards.append((label, host, payload))
+
+    if args.ssid and args.psk:
+        h_ip = hotspot_ip() or "192.168.137.1"
+        payload = (
+            f"tether://pair?h={h_ip}&p={args.port}&t={token}"
+            f"&n={args.ssid}&k={args.psk}"
+        )
+        cards.append(("HOTSPOT", args.ssid, payload))
+
+    if args.wss:
+        payload = f"tether://pair?r={args.wss}&t={token}"
+        if args.upd:
+            payload += f"&u={args.upd}"
+        cards.append(("REMOTE", "cloud tunnel", payload))
+
+    for label, host, payload in cards:
         qr = qrcode.QRCode(box_size=16, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
         qr.add_data(payload)
         qr.make(fit=True)
         img = qr.make_image(fill_color="#000000", back_color="#ffffff").convert("L")
         img.save(OUT / f"qr_{label}.png")
-        cards.append((label, host, payload))
 
     html_out = f"""<!doctype html>
 <html><head><meta charset="utf-8">

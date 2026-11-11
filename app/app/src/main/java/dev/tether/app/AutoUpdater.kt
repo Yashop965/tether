@@ -34,14 +34,18 @@ object AutoUpdater {
     @Volatile var message = ""
     @Volatile var readyFile: File? = null
 
-    /** Check for a newer build on the bridge's host. Run from a worker. */
-    fun check(ctx: Context, host: String): Release? {
+    /** Check for a newer build. Run from a worker.
+     *  [updBase] is an optional full update-server base (e.g. an https cloud
+     *  tunnel from a pair QR's `u=`); without it we fall back to the bridge
+     *  host on port 8400 (LAN/hotspot/tailnet). */
+    fun check(ctx: Context, host: String, updBase: String? = null): Release? {
         state = "checking"; progress = -1
-        val url = "http://$host:$UPDATE_PORT/tether.json"
+        val base = (if (!updBase.isNullOrBlank()) updBase else "http://$host:$UPDATE_PORT").trimEnd('/')
+        val url = "$base/tether.json"
         try {
             val conn = URL(url).openConnection() as HttpURLConnection
             conn.connectTimeout = 5000; conn.readTimeout = 5000
-            if (conn.responseCode != 200) { state = "error"; message = "update server not reachable"; return null }
+            if (conn.responseCode != 200) { state = "error"; message = "update server not reachable ($base)"; return null }
             val json = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
             val o = org.json.JSONObject(json)
@@ -53,12 +57,12 @@ object AutoUpdater {
             return Release(
                 versionCode = code,
                 versionName = o.optString("version_name"),
-                apkUrl = "http://$host:$UPDATE_PORT/" + o.optString("apk", "tether.apk"),
+                apkUrl = "$base/" + o.optString("apk", "tether.apk"),
                 sha256 = o.optString("sha256"),
                 size = o.optLong("size"),
             )
         } catch (e: Exception) {
-            state = "error"; message = "check failed ($host): ${e.message}"
+            state = "error"; message = "check failed ($base): ${e.message}"
             return null
         }
     }

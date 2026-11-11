@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit
  * OkHttp WebSocket client. JSON events out; JSON events in.
  * Audio: binary frames, then {"t":"audio_done"}.
  */
-class TetherWs(private val host: String, private val port: Int, private val token: String) {
+class TetherWs(private val host: String, private val port: Int, private val token: String, private val remote: String? = null) {
 
     interface Events {
         fun onConnected()
@@ -47,7 +47,9 @@ class TetherWs(private val host: String, private val port: Int, private val toke
 
     fun connect() {
         ws?.close(1000, "reconnect")
-        val url = "ws://$host:$port/?token=$token"
+        // remote cloud-tunnel URL (wss://…) wins over the local host:port
+        val base = if (!remote.isNullOrBlank()) remote else "ws://$host:$port"
+        val url = "$base/?token=$token"
         val req: Request
         try {
             req = Request.Builder().url(url).build()

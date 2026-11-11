@@ -63,7 +63,7 @@ fun ControlScreen() {
     // Rebuild the client when the saved pairing changes (LINK button).
     var wsVer by remember { mutableStateOf(0) }
     val ws = remember(wsVer) {
-        TetherWs(Prefs.host(ctx), Prefs.port(ctx).toIntOrNull() ?: 8377, Prefs.token(ctx))
+        TetherWs(Prefs.host(ctx), Prefs.port(ctx).toIntOrNull() ?: 8377, Prefs.token(ctx), Prefs.wss(ctx).ifBlank { null })
     }
 
     var up by remember { mutableStateOf(false) }
@@ -104,10 +104,16 @@ fun ControlScreen() {
         }
     }
 
-    /** Apply a pair QR / deep link: save creds (+hotspot), auto-join Wi-Fi, link. */
+    /** Apply a pair QR / deep link: save creds (+hotspot/+remote tunnel), auto-join Wi-Fi, link. */
     fun applyPair(uri: String) {
         val spec = AppSignal.parsePairSpec(uri) ?: return
         Prefs.save(ctx, spec.host, spec.port, spec.token)
+        Prefs.saveWss(ctx, spec.wss ?: "")
+        Prefs.saveUpd(ctx, spec.upd ?: "")
+        if (spec.wss != null) {
+            // remote pairing: never auto-join a hotspot, forget old hotspot creds
+            Prefs.saveHotspot(ctx, "", "")
+        }
         if (spec.ssid != null && spec.psk != null) {
             Prefs.saveHotspot(ctx, spec.ssid, spec.psk)
             if (Build.VERSION.SDK_INT >= 31) {
@@ -361,9 +367,9 @@ private fun UpdateChip(label: String, enabled: Boolean, onClick: () -> Unit) {
 }
 
 private fun startUpdateCheck(ctx: android.content.Context, host: String) {
-    if (host.isBlank() || AutoUpdater.state in listOf("checking", "downloading")) return
+    if ((host.isBlank() && Prefs.upd(ctx).isBlank()) || AutoUpdater.state in listOf("checking", "downloading")) return
     Thread {
-        AutoUpdater.check(ctx, host)?.let { rel -> AutoUpdater.download(ctx, rel) { } }
+        AutoUpdater.check(ctx, host, Prefs.upd(ctx).ifBlank { null })?.let { rel -> AutoUpdater.download(ctx, rel) { } }
     }.start()
 }
 
@@ -394,7 +400,7 @@ private fun LinkPanel(modifier: Modifier, connErr: String?, onScan: () -> Unit, 
     var port by remember { mutableStateOf(Prefs.port(ctx)) }
     var token by remember { mutableStateOf(Prefs.token(ctx)) }
     var showManual by remember { mutableStateOf(false) }
-    val paired = host.isNotBlank()
+    val paired = host.isNotBlank() || Prefs.wss(ctx).isNotBlank()
 
     Column(
         modifier = modifier

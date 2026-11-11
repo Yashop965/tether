@@ -28,20 +28,26 @@ object AppSignal {
         return Triple(host, port, token)
     }
 
-    /** Full pair spec incl. optional hotspot credentials (`n=` ssid, `k=` psk). */
+    /** Full pair spec incl. optional hotspot credentials (`n=` ssid, `k=` psk)
+     *  and optional remote cloud-tunnel URL (`r=` wss://…). A pair is valid if
+     *  it carries a host (LAN/hotspot) or a remote tunnel URL. */
     data class PairSpec(
         val host: String,
         val port: String,
         val token: String,
         val ssid: String? = null,
         val psk: String? = null,
+        val wss: String? = null,
+        val upd: String? = null,
     )
 
     fun parsePairSpec(uri: String): PairSpec? {
         val q = uri.substringAfter('?', "")
         if (q.isEmpty()) return null
         val p = q.split('&').associate { it.substringBefore('=') to it.substringAfter('=', "") }
-        val host = p["h"] ?: p["host"] ?: return null
+        val host = p["h"] ?: p["host"] ?: ""
+        val wss = p["r"]
+        if (host.isEmpty() && wss == null) return null
         val token = p["t"] ?: p["token"] ?: return null
         return PairSpec(
             host = host,
@@ -49,6 +55,8 @@ object AppSignal {
             token = token,
             ssid = p["n"],
             psk = p["k"],
+            wss = wss,
+            upd = p["u"],
         )
     }
 }
