@@ -34,8 +34,16 @@ class TetherWs(private val host: String, private val port: Int, private val toke
     private val main = Handler(Looper.getMainLooper())
     private var ws: WebSocket? = null
     private var events: Events? = null
+    // ---- auto-reconnect: transient drops (Wi-Fi switch, laptop sleep) heal
+    //      themselves without user re-LINKing. Backoff 2s -> 30s cap.
+    private var shouldReconnect = true
+    private var reconnectScheduled = false
+    private var backoffMs = 2000L
 
     fun setEvents(e: Events) { events = e }
+
+    /** Auto-reconnect on. When false, failures stay disconnected. */
+    fun setAutoReconnect(on: Boolean) { shouldReconnect = on }
 
     fun connect() {
         ws?.close(1000, "reconnect")
@@ -50,15 +58,22 @@ class TetherWs(private val host: String, private val port: Int, private val toke
         }
         ws = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                backoffMs = 2000L
                 main.post { events?.onConnected() }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                main.post { events?.onDisconnected() }
+                main.post {
+                    events?.onDisconnected()
+                    scheduleReconnect()
+                }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                main.post { events?.onDisconnected() }
+                main.post {
+                    events?.onDisconnected()
+                    if (code != 1000 || shouldReconnect) scheduleReconnect()
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -83,6 +98,17 @@ class TetherWs(private val host: String, private val port: Int, private val toke
 
     fun send(json: String) { ws?.send(json) }
 
+    private fun scheduleReconnect() {
+        if (!shouldReconnect || reconnectScheduled) return
+        reconnectScheduled = true
+        main.postDelayed({
+            reconnectScheduled = false
+            if (!shouldReconnect) return@postDelayed
+            connect()
+            backoffMs = (backoffMs * 2).coerceAtMost(30_000L)
+        }, backoffMs)
+    }
+
     fun sendAudio(bytes: ByteArray) {
         val chunk = 64 * 1024
         var off = 0
@@ -96,6 +122,9 @@ class TetherWs(private val host: String, private val port: Int, private val toke
     }
 
     fun close() {
+        // deliberate close (new ws instance takes over / screen disposed) -
+        // stop the auto-reconnect loop so stale instances don't keep dialing
+        shouldReconnect = false
         ws?.close(1000, "bye")
         ws = null
     }

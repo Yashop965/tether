@@ -63,6 +63,8 @@ fun ScanScreen(onQr: (String) -> Unit, onCancel: () -> Unit) {
     }
     var denied by remember { mutableStateOf(false) }
     var locked by remember { mutableStateOf(false) } // qr captured
+    var camErr by remember { mutableStateOf<String?>(null) }
+    var camState by remember { mutableStateOf("starting camera…") }
 
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         granted = it
@@ -114,8 +116,17 @@ fun ScanScreen(onQr: (String) -> Unit, onCancel: () -> Unit) {
                     analysis = a
                     val pv = Preview.Builder().build()
                     p.bindToLifecycle(lifecycle, CameraSelector.DEFAULT_BACK_CAMERA, pv, a)
+                    // make the stream state visible: STARTED = frames flowing
+                    val observer = androidx.lifecycle.Observer<androidx.camera.view.PreviewView.StreamState> { st ->
+                        when (st) {
+                            androidx.camera.view.PreviewView.StreamState.IDLE ->
+                                camState = "camera idle — waiting for surface"
+                            else -> camState = "camera live — point at the QR"
+                        }
+                    }
+                    previewView.previewStreamState.observe(lifecycle, observer)
                 } catch (e: Exception) {
-                    // camera unavailable / permissions - user can retry via cancel+scan
+                    camErr = "camera bind failed: ${e.javaClass.simpleName}: ${e.message}"
                 }
             }, androidx.core.content.ContextCompat.getMainExecutor(ctx))
         }
@@ -148,6 +159,22 @@ fun ScanScreen(onQr: (String) -> Unit, onCancel: () -> Unit) {
                     color = Color(0xFF666666),
                     fontSize = 10.sp,
                 )
+                val errText = camErr
+                if (!errText.isNullOrBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        errText,
+                        color = Color(0xFFCC4444),
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = 24.dp),
+                    )
+                } else {
+                    Text(
+                        camState,
+                        color = Color(0xFF888888),
+                        fontSize = 10.sp,
+                    )
+                }
             }
             // cancel chip
             Box(

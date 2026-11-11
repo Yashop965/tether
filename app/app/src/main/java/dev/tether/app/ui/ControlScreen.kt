@@ -1,6 +1,8 @@
 package dev.tether.app.ui
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -12,6 +14,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,6 +43,7 @@ import dev.tether.app.AutoUpdater
 import dev.tether.app.BuildConfig
 import dev.tether.app.Prefs
 import dev.tether.app.TetherWs
+import dev.tether.app.WifiPair
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -53,7 +58,7 @@ private val LineDim = Color(0xFF1C1C1C)
 // ------------------------------------------------------------------- root
 
 @Composable
-fun ControlScreen(onExit: () -> Unit) {
+fun ControlScreen() {
     val ctx = LocalContext.current
     // Rebuild the client when the saved pairing changes (LINK button).
     var wsVer by remember { mutableStateOf(0) }
@@ -69,14 +74,67 @@ fun ControlScreen(onExit: () -> Unit) {
     var proc by remember { mutableStateOf(false) }
     var connErr by remember { mutableStateOf<String?>(null) }
     var scan by remember { mutableStateOf(false) }
+    var wifiMsg by remember { mutableStateOf<String?>(null) }
+
+    // mic permission: requested when the user enters voice mode
+    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(mode) {
+        if (mode == "voice" &&
+            ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    // Wi-Fi auto-join helper (declared before the launcher that calls it)
+    fun startWifiJoin(ssid: String, psk: String) {
+        wifiMsg = "joining '$ssid'…"
+        WifiPair.join(
+            ctx, ssid, psk,
+            onProgress = { wifiMsg = it },
+            onDone = { _ -> wifiMsg = null },
+        )
+    }
+
+    // Wi-Fi auto-join permission (Android 12+); deferred join when granted
+    val wifiPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            val s = Prefs.ssid(ctx); val k = Prefs.psk(ctx)
+            if (s.isNotBlank() && k.isNotBlank()) startWifiJoin(s, k)
+        }
+    }
+
+    /** Apply a pair QR / deep link: save creds (+hotspot), auto-join Wi-Fi, link. */
+    fun applyPair(uri: String) {
+        val spec = AppSignal.parsePairSpec(uri) ?: return
+        Prefs.save(ctx, spec.host, spec.port, spec.token)
+        if (spec.ssid != null && spec.psk != null) {
+            Prefs.saveHotspot(ctx, spec.ssid, spec.psk)
+            if (Build.VERSION.SDK_INT >= 31) {
+                if (ctx.checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    startWifiJoin(spec.ssid, spec.psk)
+                } else {
+                    wifiMsg = "Wi-Fi permission needed to auto-join — requesting…"
+                    wifiPerm.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+                }
+            }
+        }
+        connErr = null
+        wsVer++
+    }
 
     // ------------------------------------------------ deep link / qr arrival
     LaunchedEffect(AppSignal.resumedTick.value) {
-        val uri = AppSignal.deepLink ?: return@LaunchedEffect
+        val uri = AppSignal.deepLink
         AppSignal.deepLink = null
-        AppSignal.parsePairUri(uri)?.let {
-            Prefs.save(ctx, it.first, it.second, it.third)
-            connErr = null
+        if (uri != null) {
+            applyPair(uri)
+        } else if (!up && Prefs.host(ctx).isNotBlank()) {
+            // returning to the app after a network switch (hotspot/5G/Wi-Fi):
+            // the auto-reconnect loop handles the dial, but a fresh instance
+            // resets the backoff and picks up any Prefs edits made elsewhere
             wsVer++
         }
     }
@@ -140,15 +198,19 @@ fun ControlScreen(onExit: () -> Unit) {
             ) {
                 Text("■", color = if (paused) Color.Black else Dim, fontSize = 14.sp)
             }
-            Spacer(Modifier.width(10.dp))
-            Box(
+        }
+
+        // transient auto-join / permission status (from a pair QR with hotspot creds)
+        val wmsg = wifiMsg
+        if (!wmsg.isNullOrBlank()) {
+            Text(
+                wmsg,
+                color = Color(0xFF88CC88),
+                fontSize = 10.sp,
                 modifier = Modifier
-                    .size(34.dp)
-                    .clickable { onExit() },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("‹", color = Dim, fontSize = 18.sp)
-            }
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 4.dp),
+            )
         }
 
         // ------------------------------------------------------ mode pills
@@ -217,9 +279,7 @@ fun ControlScreen(onExit: () -> Unit) {
         if (scan) {
             ScanScreen(
                 onQr = { txt ->
-                    AppSignal.parsePairUri(txt)?.let { Prefs.save(ctx, it.first, it.second, it.third) }
-                    connErr = null
-                    wsVer++
+                    applyPair(txt)
                     scan = false
                 },
                 onCancel = { scan = false },
@@ -333,6 +393,8 @@ private fun LinkPanel(modifier: Modifier, connErr: String?, onScan: () -> Unit, 
     var host by remember { mutableStateOf(Prefs.host(ctx)) }
     var port by remember { mutableStateOf(Prefs.port(ctx)) }
     var token by remember { mutableStateOf(Prefs.token(ctx)) }
+    var showManual by remember { mutableStateOf(false) }
+    val paired = host.isNotBlank()
 
     Column(
         modifier = modifier
@@ -342,9 +404,10 @@ private fun LinkPanel(modifier: Modifier, connErr: String?, onScan: () -> Unit, 
             .border(width = 1.dp, color = LineDim)
             .padding(20.dp),
     ) {
-        Text("NOT CONNECTED", color = Color.White, fontSize = 13.sp, letterSpacing = 3.sp)
+        Text(if (paired) "OFFLINE — RETRYING" else "NOT CONNECTED", color = Color.White, fontSize = 13.sp, letterSpacing = 3.sp)
         Text(
-            "LAN IP or Tailscale IP · port 8377 · token from 'hermes tether show'",
+            if (paired) "reconnecting automatically · rescan the QR if the laptop moved networks"
+            else "scan the QR on the laptop screen — one tap, no typing",
             color = Faint,
             fontSize = 10.sp,
             modifier = Modifier.padding(top = 6.dp, bottom = 18.dp),
@@ -357,34 +420,52 @@ private fun LinkPanel(modifier: Modifier, connErr: String?, onScan: () -> Unit, 
                 modifier = Modifier.padding(bottom = 14.dp),
             )
         }
-        LkField("HOST", host) { host = it; Prefs.save(ctx, host, port, token) }
-        Row(modifier = Modifier.padding(top = 12.dp)) {
-            LkField("PORT", port, modifier = Modifier.weight(1f)) { port = it; Prefs.save(ctx, host, port, token) }
-            LkField("TOKEN", token, modifier = Modifier.weight(1.6f).padding(start = 12.dp)) { token = it; Prefs.save(ctx, host, port, token) }
+
+        // --------------------------------------------- QR is the primary path
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.White)
+                .clickable { onScan() }
+                .padding(vertical = 13.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("SCAN QR", color = Color.Black, fontSize = 13.sp, letterSpacing = 5.sp)
         }
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 22.dp)) {
+
+        // ------------------------------------------- manual config, folded
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 14.dp)
+                .clickable { showManual = !showManual },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                if (showManual) "HIDE MANUAL CONFIG" else "MANUAL CONFIG (IP + TOKEN)",
+                color = Faint,
+                fontSize = 9.sp,
+                letterSpacing = 2.sp,
+            )
+        }
+        if (showManual) {
+            LkField("HOST", host) { host = it; Prefs.save(ctx, host, port, token) }
+            Row(modifier = Modifier.padding(top = 12.dp)) {
+                LkField("PORT", port, modifier = Modifier.weight(1f)) { port = it; Prefs.save(ctx, host, port, token) }
+                LkField("TOKEN", token, modifier = Modifier.weight(1.6f).padding(start = 12.dp)) { token = it; Prefs.save(ctx, host, port, token) }
+            }
             Box(
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(top = 18.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .border(width = 1.dp, color = Color(0xFF444444))
-                    .clickable { onScan() }
-                    .padding(vertical = 11.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("SCAN QR", color = Color(0xFFAAAAAA), fontSize = 12.sp, letterSpacing = 4.sp)
-            }
-            Spacer(Modifier.width(10.dp))
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color.White)
                     .clickable(enabled = host.isNotBlank()) { onLink(Triple(host, port, token)) }
                     .padding(vertical = 11.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("LINK", color = Color.Black, fontSize = 12.sp, letterSpacing = 4.sp)
+                Text("LINK", color = Color(0xFFAAAAAA), fontSize = 12.sp, letterSpacing = 4.sp)
             }
         }
     }

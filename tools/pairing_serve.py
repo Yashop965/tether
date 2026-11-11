@@ -32,8 +32,11 @@ def tailscale_ip() -> str | None:
         import subprocess
         out = subprocess.run(
             ["tailscale", "ip"], capture_output=True, text=True, timeout=8
-        ).stdout.strip()
-        return out or None
+        ).stdout.split()
+        for line in out:  # first line = v4 if present; skip v6
+            if line.count(".") == 3:
+                return line
+        return None
     except Exception:
         return None
 

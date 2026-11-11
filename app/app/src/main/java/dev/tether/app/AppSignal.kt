@@ -27,4 +27,28 @@ object AppSignal {
         val token = params["t"] ?: params["token"] ?: return null
         return Triple(host, port, token)
     }
+
+    /** Full pair spec incl. optional hotspot credentials (`n=` ssid, `k=` psk). */
+    data class PairSpec(
+        val host: String,
+        val port: String,
+        val token: String,
+        val ssid: String? = null,
+        val psk: String? = null,
+    )
+
+    fun parsePairSpec(uri: String): PairSpec? {
+        val q = uri.substringAfter('?', "")
+        if (q.isEmpty()) return null
+        val p = q.split('&').associate { it.substringBefore('=') to it.substringAfter('=', "") }
+        val host = p["h"] ?: p["host"] ?: return null
+        val token = p["t"] ?: p["token"] ?: return null
+        return PairSpec(
+            host = host,
+            port = p["p"] ?: p["port"] ?: "8377",
+            token = token,
+            ssid = p["n"],
+            psk = p["k"],
+        )
+    }
 }
