@@ -1,0 +1,13 @@
+# build output
+app/build/
+app/.gradle/
+*.log
+# generated python
+__pycache__/
+*.pyc
+plugin/_data/
+# generated serving artifacts (rebuilt by tools/update_serve.py + tools/pairing_serve.py)
+tools/apkserve/
+# os
+Thumbs.db
+.DS_Store
