@@ -86,6 +86,27 @@ def spawn(key: str, url: str | None) -> str | None:
 def write_state(urls: dict) -> None:
     STATE.write_text(json.dumps(urls, indent=2), encoding="utf-8")
     log(f"state: {urls}")
+    publish(urls)
+
+
+def publish(urls: dict) -> None:
+    """Push live tunnel URLs to a public relay so the phone app can discover
+    them WITHOUT a prior LAN/hotspot pairing (ntfy.sh: free, no account).
+    The app polls this topic; messages are ephemeral quick-tunnel URLs only."""
+    import urllib.request
+    topic = "tether-lab-updates"
+    try:
+        body = json.dumps(urls).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=body,
+            method="POST",
+            headers={"Title": "tether", "Priority": "low", "Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=15)
+        log(f"published URLs to ntfy.sh/{topic}")
+    except Exception as e:  # noqa: BLE001
+        log(f"ntfy publish failed: {e}")
 
 
 def regen_pairing(urls: dict) -> None:
