@@ -111,16 +111,21 @@ class TetherWs(private val host: String, private val port: Int, private val toke
         }, backoffMs)
     }
 
-    fun sendAudio(bytes: ByteArray) {
+    /** Chunked binary audio send. Returns bytes actually queued (0 = failed). */
+    fun sendAudio(bytes: ByteArray): Int {
         val chunk = 64 * 1024
         var off = 0
+        var sent = 0
         while (off < bytes.size) {
             val n = minOf(chunk, bytes.size - off)
             val buf = okio.Buffer()
             buf.write(bytes, off, n)
-            ws?.send(buf.readByteString()) ?: break
+            val ok = ws?.send(buf.readByteString()) ?: false
+            if (!ok) break
             off += n
+            sent += n
         }
+        return sent
     }
 
     fun close() {

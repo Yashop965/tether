@@ -16,6 +16,12 @@ import android.os.Looper
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -28,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -623,37 +630,65 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
 @Composable
 fun TiltSurface(ws: TetherWs, modifier: Modifier) {
     val ctx = LocalContext.current
-    // Laser pointer: phone orientation (gravity-anchored rotation vector) maps
-    // to ABSOLUTE screen position — point the phone at the laptop screen and
-    // the cursor sits where you're aiming. No calibration: "neutral" (held
-    // upright in front of the chest) is screen center by construction.
+    // Laser / air-pen: on entering the surface we capture your "neutral" pose
+    // (wherever you're standing, however you hold the phone). Beyond a small
+    // deadzone, tilt OFFSET becomes cursor velocity — move the phone like a
+    // laser pointer: tilt right -> cursor right, top down -> cursor down.
+    // Absolute aim coords are integrated locally, so the bridge just moves.
     var aimX by remember { mutableFloatStateOf(0f) }
     var aimY by remember { mutableFloatStateOf(0f) }
+    var recal by remember { mutableStateOf(0) }
+    var calibrating by remember { mutableStateOf(true) }
 
-    DisposableEffect(ctx) {
+    DisposableEffect(ctx, recal) {
+        calibrating = true
+        aimX = 0f
+        aimY = 0f
         val sm = ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val sensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         var lastSend = 0L
+        var lastTs = 0L
         var aX = 0f
         var aY = 0f
-        val rollRange = Math.toRadians(55.0).toFloat()   // full tilt right -> +1
-        val pitchRange = Math.toRadians(40.0).toFloat()  // full tilt up -> -1
+        // velocity gains (rel-space units/sec per radian of tilt past deadzone)
+        val gain = 2.2f
+        val dead = 0.10f // ~6° — ignore sensor drift / hand hold noise
+        var baseSet = false
+        var baseP = 0f
+        var baseR = 0f
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
-                if (SystemClock.elapsedRealtime() - lastSend < 33L) return
-                lastSend = SystemClock.elapsedRealtime()
+                val now = SystemClock.elapsedRealtime()
+                if (!baseSet) {
+                    // calibrate: average the first ~500 ms of readings
+                    if (lastTs == 0L) { lastTs = now; baseSet = true; calibrating = false }
+                    else if (now - lastTs < 500L) {
+                        val q0 = e.values
+                        val m22 = 1 - 2 * (q0[0] * q0[0] + q0[1] * q0[1])
+                        val m00 = 1 - 2 * (q0[1] * q0[1] + q0[2] * q0[2])
+                        val m10 = 2 * (q0[0] * q0[1] + q0[2] * q0[3])
+                        baseP += (Math.asin(m22.toDouble()).toFloat() - baseP) * 0.2f
+                        baseR += (Math.atan2(m00.toDouble(), m10.toDouble()).toFloat() - baseR) * 0.2f
+                        return
+                    }
+                    lastTs = now
+                }
+                if (now - lastSend < 33L) return
+                val dt = (now - lastSend) / 1000f
+                lastSend = now
                 val qx = e.values[0]; val qy = e.values[1]; val qz = e.values[2]; val qw = e.values[3]
-                // quaternion -> rotation matrix (device -> world)
                 val m00 = 1 - 2 * (qy * qy + qz * qz)
                 val m10 = 2 * (qx * qy + qz * qw)
                 val m22 = 1 - 2 * (qx * qx + qy * qy)
-                val roll = Math.atan2(m00.toDouble(), m10.toDouble()).toFloat()   // +90° at neutral
-                val pitch = Math.asin(m22.toDouble()).toFloat()                  // 0 at neutral
-                val tx = ((Math.PI / 2.0 - roll) / rollRange).toFloat().coerceIn(-1f, 1f)
-                val ty = (-pitch / pitchRange).toFloat().coerceIn(-1f, 1f)
-                // exponential smoothing kills sensor jitter
-                aX = 0.55f * aX + 0.45f * tx
-                aY = 0.55f * aY + 0.45f * ty
+                val roll = Math.atan2(m00.toDouble(), m10.toDouble()).toFloat()
+                val pitch = Math.asin(m22.toDouble()).toFloat()
+                val dr = roll - baseR
+                val dp = pitch - baseP
+                val ox = when { dr > dead -> dr - dead; dr < -dead -> dr + dead; else -> 0f }
+                val oy = when { dp > dead -> dp - dead; dp < -dead -> dp + dead; else -> 0f }
+                // velocity = gain * past-deadzone tilt offset
+                aX = (aX + gain * ox * dt).coerceIn(-1f, 1f)
+                aY = (aY + gain * oy * dt).coerceIn(-1f, 1f)
                 aimX = aX
                 aimY = aY
                 ws.send(
@@ -677,7 +712,7 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
             .background(Color(0xFF050505))
             .clip(RoundedCornerShape(14.dp))
             .border(width = 1.dp, color = LineDim)
-            .pointerInput(ws) {
+            .pointerInput(ws, recal) {
                 var active = 0
                 var maxActive = 0
                 var pressStart = 0L
@@ -743,8 +778,22 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
                 )
             }
         }
+        // re-calibrate chip — capture a new neutral pose wherever you are
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(10.dp)
+                .background(Color(0x33FFFFFF), shape = RoundedCornerShape(10.dp))
+                .clickable { recal++ }
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text("RESET AIM", color = Color(0xFFAAAAAA), fontSize = 9.sp, letterSpacing = 2.sp)
+        }
         Text(
-            "point phone at screen · aim moves cursor · tap = click",
+            when {
+                calibrating -> "hold still — capturing your neutral pose…"
+                else -> "move phone like a laser · tap = click · right-tap = right click"
+            },
             color = Faint,
             fontSize = 10.sp,
             letterSpacing = 1.sp,
@@ -759,14 +808,21 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
 fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Boolean?, up: Boolean, proc: Boolean = false) {
     val ctx = LocalContext.current
     var busy by remember { mutableStateOf(false) }
+    var err by remember { mutableStateOf<String?>(null) }
     val file = remember { File(ctx.cacheDir, "tether.m4a") }
     val main = remember { Handler(Looper.getMainLooper()) }
-    // recorder lives in a volatile holder — it is created/stopped from worker
-    // threads; Compose state stays on main.
-    val recHolder = remember { object { @Volatile var r: MediaRecorder? = null } }
+    // recorder + timestamps live in a volatile holder — created/stopped from
+    // worker threads; Compose state stays on main.
+    val recHolder = remember {
+        object {
+            @Volatile var r: MediaRecorder? = null
+            @Volatile var start = 0L
+        }
+    }
 
     fun start() {
         if (recHolder.r != null || !up) return
+        err = null
         busy = true
         Thread {
             // AAC first (best whisper fidelity); fall back to AMR if the
@@ -793,12 +849,13 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
                         start()
                     }
                     recHolder.r = r
+                    recHolder.start = SystemClock.elapsedRealtime()
                     return@Thread
                 } catch (_: Exception) {
                     // this codec combo failed on this HAL — try the next
                 }
             }
-            main.post { busy = false }
+            main.post { busy = false; err = "mic could not start" }
         }.start()
     }
 
@@ -807,21 +864,48 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
         recHolder.r = null
         busy = false
         if (r == null) return
+        val dur = SystemClock.elapsedRealtime() - recHolder.start
         Thread {
             try { r.stop() } catch (_: Exception) {}
             r.release()
-            if (file.exists()) {
-                ws.sendAudio(file.readBytes())
+            val bytes = if (file.exists()) file.readBytes() else ByteArray(0)
+            file.delete()
+            if (dur < 700L || bytes.size < 4096) {
+                main.post { err = "too short — hold the mic ~1 second or more" }
+                return@Thread
+            }
+            val sent = ws.sendAudio(bytes)
+            if (sent > 0) {
                 ws.send(TetherWs.AUDIO_DONE)
-                file.delete()
+            } else {
+                main.post { err = "audio not sent — link may have dropped, tap again" }
             }
         }.start()
     }
 
     DisposableEffect(note) {
-        if (note != null) { busy = false }
+        if (note != null) { err = null }
         onDispose { }
     }
+
+    // pulsing ring while recording
+    val pulse = rememberInfiniteTransition()
+    val ring by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.5f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(650, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+    )
+    val ringAlpha by pulse.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 0.15f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(650, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+    )
 
     Box(
         modifier = modifier
@@ -836,28 +920,52 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
             // mic button — proportional to surface width, capped
             BoxWithConstraints {
                 val side = minOf(maxWidth * 0.40f, 140.dp)
-                Box(
-                    modifier = Modifier
-                        .size(side)
-                        .clip(CircleShape)
-                        .border(width = 1.dp, color = if (busy || proc) Color.White else Line)
-                        .background(Color.Black)
-                        .clickable(enabled = up || busy) {
-                            if (busy) stopAndSend() else start()
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    MicGlyph(busy)
+                Box(contentAlignment = Alignment.Center) {
+                    if (busy) {
+                        // expanding pulse rings behind the mic
+                        Box(
+                            modifier = Modifier
+                                .size(side * ring)
+                                .clip(CircleShape)
+                                .border(width = 1.dp, color = Color(0x66FFFFFF))
+                                .alpha(ringAlpha),
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(side * (1 + 0.25f * ring))
+                                .clip(CircleShape)
+                                .border(width = 1.dp, color = Color(0x33FFFFFF))
+                                .alpha((1.5f - ring) * 1.2f),
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(side)
+                            .clip(CircleShape)
+                            .border(width = 1.dp, color = if (busy || proc) Color.White else Line)
+                            .background(Color.Black)
+                            .clickable(enabled = up || busy) {
+                                if (busy) stopAndSend() else start()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        MicGlyph(busy)
+                    }
                 }
             }
             Text(
                 when {
+                    err != null -> err.orEmpty()
                     proc -> "PROCESSING…"
                     busy -> "LISTENING… TAP TO SEND"
                     !up -> "NOT CONNECTED"
                     else -> "TAP TO TALK"
                 },
-                color = if (busy || proc) Color.White else Dim,
+                color = when {
+                    err != null -> Color(0xFFCC4444)
+                    (busy || proc) -> Color.White
+                    else -> Dim
+                },
                 fontSize = 11.sp,
                 letterSpacing = 3.sp,
                 modifier = Modifier.padding(top = 18.dp),

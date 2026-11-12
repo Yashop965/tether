@@ -11,3 +11,5 @@ tools/apkserve/
 # os
 Thumbs.db
 .DS_Store
+tools/.bridge_guard.pid
+tools/.tunnel_guard.pid
