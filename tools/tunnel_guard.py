@@ -221,13 +221,14 @@ def main() -> int:
 
     while True:
         time.sleep(30)
-        for key in list(urls):
-            if alive(TARGETS[key][0], urls[key]):
+        for key in ("bridge", "upd"):
+            cur = urls.get(key)
+            if cur and alive(TARGETS[key][0], cur):
                 continue
-            log(f"{key} tunnel dead (process or URL) — force restarting")
+            log(f"{key} tunnel dead or unregistered — restarting")
             kill_for_origin(TARGETS[key][0])
             time.sleep(2)
-            new = spawn(key, urls[key])
+            new = spawn(key, cur)
             if new:
                 urls[key] = new
                 write_state(urls)
