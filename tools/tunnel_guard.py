@@ -77,7 +77,8 @@ def spawn(key: str, url: str | None) -> str | None:
         [str(CFD), "tunnel", "--url", origin, "--no-autoupdate"],
         stdout=open(logpath, "a", encoding="utf-8", errors="replace"),
         stderr=subprocess.STDOUT,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                       | getattr(subprocess, "CREATE_NO_WINDOW", 0)),
     )
     log(f"spawned {key} -> {origin}")
     return wait_url(logpath, url)
@@ -159,6 +160,22 @@ def main() -> int:
     if not CFD.exists():
         log(f"cloudflared not found at {CFD} — set CFD_PATH")
         return 1
+    # singleton: never run two tunnel_guards (they fight over cloudflared)
+    lock = REPO / "tools" / ".tunnel_guard.pid"
+    me = os.getpid()
+    try:
+        if lock.exists():
+            old = int(lock.read_text().strip() or "0")
+            if old and old != me:
+                chk = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {old}", "/NH"],
+                    capture_output=True, text=True, timeout=15)
+                if "python" in chk.stdout.lower() or "Info:" not in chk.stdout:
+                    log(f"another tunnel_guard (pid {old}) is running — exiting")
+                    return 0
+    except Exception:  # noqa: BLE001
+        pass
+    lock.write_text(str(me))
     kill_existing()
     urls: dict = {}
     for key in ("bridge", "upd"):

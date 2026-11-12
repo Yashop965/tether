@@ -21,7 +21,7 @@ REPO = Path(__file__).parent.parent
 APKSERVE = REPO / "tools" / "apkserve"
 TOKEN_FILE = REPO / "tools" / "bridge.token"
 PORT = int(os.environ.get("TETHER_PORT", "8377"))
-HTTP_PORT = PORT + 1
+HTTP_PORT = 8400  # update/pairing server (NOT PORT+1 — that's the UDP fast port)
 LOG = REPO / "tools" / "bridge_guard.log"
 
 VENV_PY = (
@@ -58,22 +58,28 @@ def stable_token() -> str:
 
 
 def reap_strays(lg: logging.Logger) -> None:
-    """Kill python processes from earlier guard runs that still hold the ports."""
+    """Kill python processes from earlier guard runs that still hold the ports.
+
+    Matches only the CHILD command lines (bridge + update server) — never the
+    guards themselves, whose paths also contain 'tether'."""
     try:
         out = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-Command",
-                "Get-Process python* -ErrorAction SilentlyContinue | Where-Object { "
-                "($_.CommandLine -or '') -match 'tether|_local_run|http.server' } | ForEach-Object { $_.Id }",
-            ],
-            capture_output=True, text=True, timeout=30,
+            ["tasklist", "/v", "/nh"],
+            capture_output=True, text=True, timeout=90,
         )
-        pids = [p for p in out.stdout.split() if p.strip().isdigit()]
-        for pid in pids:
-            if int(pid) != os.getpid():
-                subprocess.run(["taskkill", "/F", "/PID", pid],
-                               capture_output=True, text=True)
-                lg.info("reaped stray pid %s", pid)
+        pids = set()
+        for line in out.stdout.splitlines():
+            cols = line.split()
+            # tasklist /v columns: image PID session name session# mem ... description
+            if len(cols) < 3:
+                continue
+            if ("_local_run" in line or "http.server" in line) and "guard" not in line \
+                    and cols[0].lower().endswith((".exe", "python")) and cols[1].isdigit():
+                pids.add(int(cols[1]))
+        for pid in sorted(pids):
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, text=True)
+            lg.info("reaped stray pid %s", pid)
     except Exception as exc:  # noqa: BLE001 - best effort
         lg.warning("reap failed: %s", exc)
 
@@ -81,25 +87,45 @@ def reap_strays(lg: logging.Logger) -> None:
 def start_bridge(token: str, lg: logging.Logger) -> subprocess.Popen | None:
     cmd = [PYTHON, str(REPO / "plugin" / "_local_run.py"),
            "--port", str(PORT), "--token", token]
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
     proc = subprocess.Popen(cmd, cwd=str(REPO),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                            creationflags=flags)
     lg.info("bridge spawned pid=%s", proc.pid)
     return proc
 
 
 def start_http(lg: logging.Logger) -> None:
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
     proc = subprocess.Popen([sys.executable, "-m", "http.server", str(HTTP_PORT),
                              "--bind", "0.0.0.0"],
                            cwd=str(APKSERVE),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                           creationflags=flags)
     lg.info("http spawned pid=%s", proc.pid)
 
 
 def main() -> int:
     lg = get_logger()
     lg.info("=== bridge_guard start (python=%s) ===", PYTHON)
+    # singleton: a second bridge_guard would fight the first over ports 8377/8400
+    lock = REPO / "tools" / ".bridge_guard.pid"
+    me = os.getpid()
+    try:
+        if lock.exists():
+            old = int(lock.read_text().strip() or "0")
+            if old and old != me:
+                chk = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {old}", "/NH"],
+                    capture_output=True, text=True, timeout=15)
+                if "python" in chk.stdout.lower() or "Info:" not in chk.stdout:
+                    lg.info("another bridge_guard (pid %d) is running — exiting", old)
+                    return 0
+    except Exception:  # noqa: BLE001
+        lg.warning("singleton check failed — continuing")
+    lock.write_text(str(me))
     token = stable_token()
     lg.info("stable token=%s (file)", token[:6] + "…")
     reap_strays(lg)
@@ -111,6 +137,7 @@ def main() -> int:
 
     restarts = 0
     last_check = time.time()
+    last_http_try = 0.0
     while True:
         try:
             if not port_open(PORT):
@@ -125,10 +152,16 @@ def main() -> int:
                 if port_open(PORT):
                     lg.info("bridge back UP on :%d", PORT)
                 else:
-                    lg.error("bridge FAILED to come up; retrying in 5s")
-                    time.sleep(5)
-            if not port_open(HTTP_PORT) and restarts % 5 == 0:
-                lg.warning("http DOWN -> restarting")
+                    lg.error("bridge FAILED to come up; retrying in 30s")
+                    time.sleep(30)
+            if not port_open(HTTP_PORT) and time.time() - last_http_try > 30:
+                last_http_try = time.time()
+                lg.warning("http DOWN -> restarting (reaping strays first)")
+                try:
+                    reap_strays(lg)
+                    time.sleep(1)
+                except Exception:  # noqa: BLE001
+                    pass
                 start_http(lg)
             # heartbeat line every ~10 min so a log gap is itself a signal
             if time.time() - last_check > 600:
