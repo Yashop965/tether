@@ -89,24 +89,49 @@ def write_state(urls: dict) -> None:
     publish(urls)
 
 
+GIST_ID = "98c806c159f0a914987adcfdb467098e"
+GIST_RAW = f"https://gist.githubusercontent.com/Yashop965/{GIST_ID}/raw"
+
+
 def publish(urls: dict) -> None:
     """Push live tunnel URLs to a public relay so the phone app can discover
-    them WITHOUT a prior LAN/hotspot pairing (ntfy.sh: free, no account).
-    The app polls this topic; messages are ephemeral quick-tunnel URLs only."""
+    them WITHOUT a prior LAN/hotspot pairing. Primary: public Gist (the app
+    GETs GIST_RAW — stable URL baked into the APK). Fallback: ntfy.sh."""
+    # 1) Gist (verified read-side from the app's perspective)
+    try:
+        import tempfile
+        payload = json.dumps({
+            "description": "Tether live tunnel URLs (public relay for app self-update)",
+            "files": {"urls.json": {"content": json.dumps(urls, indent=2)}},
+        })
+        tf = tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w")
+        tf.write(payload)
+        tf.close()
+        r = subprocess.run(
+            ["gh", "api", "-X", "PATCH", f"gists/{GIST_ID}", "--input", tf.name],
+            capture_output=True, text=True, timeout=30,
+            creationflags=NOWIN, cwd=str(REPO),
+        )
+        if r.returncode == 0:
+            log(f"published URLs to gist ({GIST_RAW})")
+        else:
+            log(f"gist publish failed: {r.stderr.strip()[:120]}")
+        os.unlink(tf.name)
+    except Exception as e:  # noqa: BLE001
+        log(f"gist publish error: {e}")
+    # 2) ntfy fallback
     import urllib.request
-    topic = "tether-lab-updates"
     try:
         body = json.dumps(urls).encode("utf-8")
         req = urllib.request.Request(
-            f"https://ntfy.sh/{topic}",
-            data=body,
-            method="POST",
-            headers={"Title": "tether", "Priority": "low", "Content-Type": "application/json"},
+            "https://ntfy.sh/tether-lab-updates",
+            data=body, method="POST",
+            headers={"Title": "tether", "Priority": "low",
+                     "Content-Type": "application/json"},
         )
         urllib.request.urlopen(req, timeout=15)
-        log(f"published URLs to ntfy.sh/{topic}")
-    except Exception as e:  # noqa: BLE001
-        log(f"ntfy publish failed: {e}")
+    except Exception:  # noqa: BLE001 - best effort
+        pass
 
 
 def regen_pairing(urls: dict) -> None:

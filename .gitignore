@@ -13,3 +13,4 @@ Thumbs.db
 .DS_Store
 tools/.bridge_guard.pid
 tools/.tunnel_guard.pid
+tools/_gist_test.json
