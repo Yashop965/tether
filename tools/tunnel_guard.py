@@ -25,6 +25,7 @@ CFD = Path(os.environ.get("CFD_PATH", r"C:\Users\yashs\tools\cloudflared.exe"))
 LOGDIR = REPO / "tools"
 STATE = LOGDIR / "tunnels.json"
 URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # never flash a console window
 
 TARGETS = {
     "bridge": ("http://127.0.0.1:8377", LOGDIR / "cloudflared_bridge.log"),
@@ -44,10 +45,8 @@ def log(msg: str) -> None:
 
 def kill_existing() -> None:
     subprocess.run(
-        ['powershell', '-NoProfile', '-Command',
-         "(Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\") | "
-         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
-        capture_output=True, timeout=30,
+        ["taskkill", "/IM", "cloudflared.exe", "/F"],
+        capture_output=True, timeout=30, creationflags=NOWIN,
     )
     time.sleep(2)
 
@@ -101,33 +100,16 @@ def regen_pairing(urls: dict) -> None:
     if upd:
         args += ["--upd", upd]
     try:
-        subprocess.run(args, timeout=60, capture_output=True, text=True)
+        subprocess.run(args, timeout=60, capture_output=True, text=True, creationflags=NOWIN)
         log("pairing page regenerated with cloud URLs")
     except Exception as e:  # noqa: BLE001
         log(f"pairing regen failed: {e}")
 
 
 def alive(origin: str, url: str) -> bool:
-    """Process alive AND the quick-tunnel URL actually answers.
-
-    Quick tunnels get kicked by Cloudflare while the cloudflared process
-    keeps running (zombie) — an answer-check is the only real liveness."""
-    pat = re.escape(origin)
-    ps = (
-        "(Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\") | "
-        "ForEach-Object { $_.CommandLine } | Where-Object { $_ -and $_ -match '"
-        + pat
-        + "' } | Measure-Object | Select-Object -ExpandProperty Count"
-    )
-    r = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps],
-        capture_output=True, text=True, timeout=30,
-    )
-    try:
-        proc_alive = int(r.stdout.strip().splitlines()[-1]) > 0
-    except Exception:  # noqa: BLE001
-        proc_alive = False
-    if not proc_alive or not url:
+    """URL actually answers (zombie cloudflareds with a dead quick tunnel
+    fail the probe; the restart path then kills all cloudflareds)."""
+    if not url:
         return False
     import urllib.error
     import urllib.request
@@ -135,25 +117,17 @@ def alive(origin: str, url: str) -> bool:
         code = urllib.request.urlopen(url, timeout=10).getcode()
         return code is not None
     except urllib.error.HTTPError as e:
-        # 4xx/4xx-ish from Cloudflare still means the tunnel registered
+        # 4xx from Cloudflare still means the tunnel is registered
         return e.code < 500 or e.code in (426, 404)
     except Exception:  # noqa: BLE001
         return False
 
 
 def kill_for_origin(origin: str) -> None:
-    pat = re.escape(origin)
-    ps = (
-        "(Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\") | "
-        "ForEach-Object { $_.CommandLine } | Where-Object { $_ -and $_ -match '"
-        + pat
-        + "' } | ForEach-Object { "
-        "Get-CimInstance Win32_Process -Filter \"name='cloudflared.exe'\" | "
-        "Where-Object { $_.CommandLine -match '" + pat + "' } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"
-    )
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                   capture_output=True, timeout=30, check=False)
+    # taskkill can't match command lines — kill ALL cloudflared; the loop
+    # re-spawns whichever target is missing (both are on 127.0.0.1 anyway).
+    subprocess.run(["taskkill", "/IM", "cloudflared.exe", "/F"],
+                   capture_output=True, timeout=30, check=False, creationflags=NOWIN)
 
 
 def main() -> int:
@@ -169,7 +143,7 @@ def main() -> int:
             if old and old != me:
                 chk = subprocess.run(
                     ["tasklist", "/FI", f"PID eq {old}", "/NH"],
-                    capture_output=True, text=True, timeout=15)
+                    capture_output=True, text=True, timeout=15, creationflags=NOWIN)
                 if "python" in chk.stdout.lower() or "Info:" not in chk.stdout:
                     log(f"another tunnel_guard (pid {old}) is running — exiting")
                     return 0

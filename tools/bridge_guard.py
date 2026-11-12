@@ -66,6 +66,7 @@ def reap_strays(lg: logging.Logger) -> None:
         out = subprocess.run(
             ["tasklist", "/v", "/nh"],
             capture_output=True, text=True, timeout=90,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         pids = set()
         for line in out.stdout.splitlines():
@@ -78,7 +79,8 @@ def reap_strays(lg: logging.Logger) -> None:
                 pids.add(int(cols[1]))
         for pid in sorted(pids):
             subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             lg.info("reaped stray pid %s", pid)
     except Exception as exc:  # noqa: BLE001 - best effort
         lg.warning("reap failed: %s", exc)
@@ -119,7 +121,8 @@ def main() -> int:
             if old and old != me:
                 chk = subprocess.run(
                     ["tasklist", "/FI", f"PID eq {old}", "/NH"],
-                    capture_output=True, text=True, timeout=15)
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if "python" in chk.stdout.lower() or "Info:" not in chk.stdout:
                     lg.info("another bridge_guard (pid %d) is running — exiting", old)
                     return 0
