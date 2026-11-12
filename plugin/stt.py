@@ -30,10 +30,15 @@ class Transcriber:
         if not audio:
             return ""
         model = self._get_model()
-        segments, _info = model.transcribe(
-            io.BytesIO(audio),
-            beam_size=1,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=400),
-        )
-        return " ".join(s.text.strip() for s in segments).strip()
+        try:
+            segments, _info = model.transcribe(
+                io.BytesIO(audio),
+                beam_size=1,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=400),
+            )
+            return " ".join(s.text.strip() for s in segments).strip()
+        except Exception as exc:  # decode failures (AMR container etc.) surface
+            # as stt_error instead of hanging the phone on "PROCESSING…"
+            logger.warning("tether: transcription failed: %s", exc)
+            return ""

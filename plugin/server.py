@@ -561,7 +561,11 @@ class TetherServer:
             await self._send(ws, {"t": "stt_pending"})
             text = await asyncio.to_thread(self.stt.transcribe, audio)
             if not text:
-                await self._send(ws, {"t": "stt_error", "error": "could not transcribe"})
+                await self._send(ws, {
+                    "t": "stt_error",
+                    "error": f"heard nothing ({len(audio)} bytes of audio) — "
+                             "speak a bit longer / closer to the mic and try again",
+                })
                 return
             key = resolve_session_key(self.settings, self.ctx)
             try:

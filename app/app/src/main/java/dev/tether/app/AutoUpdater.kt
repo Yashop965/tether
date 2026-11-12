@@ -49,12 +49,12 @@ object AutoUpdater {
     /** Poll the relay and save its live cloud URLs (wss + upd) to Prefs.
      *  Returns the fresh URLs, or null if the relay is unreachable (caller
      *  falls back to whatever Prefs already holds). Run from a worker. */
-    fun refreshRelay(ctx: Context): RelayUrls? {
+    fun refreshRelay(ctx: Context, timeoutMs: Int = 8000): RelayUrls? {
         try {
             // cache-bust: gist raw is CDN-cached; a per-call query forces a hit
             val url = "$RELAY_RAW?cb=${System.currentTimeMillis()}"
             val conn = URL(url).openConnection() as HttpURLConnection
-            conn.connectTimeout = 8000; conn.readTimeout = 8000
+            conn.connectTimeout = timeoutMs; conn.readTimeout = timeoutMs
             if (conn.responseCode != 200) { conn.disconnect(); return null }
             val o = org.json.JSONObject(conn.inputStream.bufferedReader().readText())
             conn.disconnect()
@@ -84,8 +84,8 @@ object AutoUpdater {
     fun check(ctx: Context, host: String, updBase: String? = null): Release? {
         state = "checking"; progress = -1
         val bases = buildList {
-            if (!updBase.isNullOrBlank()) add(updBase)
-            if (host.isNotBlank()) add("http://$host:$UPDATE_PORT")
+            if (host.isNotBlank()) add("http://$host:$UPDATE_PORT")   // LAN first: instant when paired
+            if (!updBase.isNullOrBlank()) add(updBase)                // cloud fallback
         }.map { it.trimEnd('/') }.distinct().filter { it.isNotBlank() }
         if (bases.isEmpty()) {
             state = "error"; message = "no update source (pair or relay first)"

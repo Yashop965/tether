@@ -377,14 +377,18 @@ private fun UpdateChip(label: String, enabled: Boolean, onClick: () -> Unit) {
 
 private fun startUpdateCheck(ctx: android.content.Context, host: String) {
     if (AutoUpdater.state in listOf("checking", "downloading")) return
+    // immediate UI feedback — a tap must never look dead
+    AutoUpdater.state = "checking"
+    AutoUpdater.message = "checking…"
     Thread {
-        // Refresh the discovery relay first — it may now carry live cloud
-        // endpoints even when this phone has never paired with this laptop.
-        AutoUpdater.refreshRelay(ctx)
+        // LAN host first (fast, live when paired); the relay only SEEDS a
+        // cloud base as fallback — and with a short timeout so a flaky relay
+        // can't hold the check hostage.
+        AutoUpdater.refreshRelay(ctx, 3000)
         val upd = Prefs.upd(ctx)
         if (host.isBlank() && upd.isBlank()) {
             AutoUpdater.state = "error"
-            AutoUpdater.message = "no update source (laptop off or relay down)"
+            AutoUpdater.message = "no update source (pair or relay down)"
             return@Thread
         }
         AutoUpdater.check(ctx, host, upd.ifBlank { null })?.let { rel ->
@@ -550,6 +554,8 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                 var accY = 0f
                 var sX = 0f            // smoothed pointer speed, px/s
                 var sY = 0f
+                var residX = 0f        // finger distance not yet sent (converges to 0)
+                var residY = 0f
                 val slopPx = 24f
                 // LAN: 16 ms batches so the host's 60 Hz pump gets enough
                 // samples to interpolate; cloud: keep 33 ms (fewer hops).
@@ -600,19 +606,26 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                                             // only adds jitter for no distance gain.
                                             val now = p.uptimeMillis
                                             if (movedPastSlop && now - lastSend >= coalesceMs) {
-                                                val dt = (now - lastSend) / 1000f
-                                                if (dt > 0f) {
-                                                    val instX = accX / dt
-                                                    val instY = accY / dt
-                                                    // exponential smoothing of speed — the
-                                                    // touchpad "glide" feel: the cursor eases
-                                                    // toward the finger's rate instead of
-                                                    // jumping in batches
-                                                    sX = if (instX == 0f) sX * 0.8f else 0.55f * sX + 0.45f * instX
-                                                    sY = if (instY == 0f) sY * 0.8f else 0.55f * sY + 0.45f * instY
+                                                val dtb = (now - lastSend) / 1000f
+                                                if (dtb > 0f) {
+                                                    // TOUCHPAD EASING: send a smoothed rate instead of the raw
+                                                    // batch — the cursor chases the finger with ~45ms of
+                                                    // lag (like a real trackpad) instead of jumping in
+                                                    // 16ms steps. A residual term guarantees the total
+                                                    // distance still converges to where the finger went.
+                                                    val targetRate = accX / dtb
+                                                    val targetRateY = accY / dtb
+                                                    val alpha = (dtb / 0.045f).coerceIn(0.15f, 1f)
+                                                    sX = sX + (targetRate - sX) * alpha
+                                                    sY = sY + (targetRateY - sY) * alpha
+                                                    residX += accX - sX * dtb
+                                                    residY += accY - sY * dtb
                                                 }
-                                                val dx = accX / size.width
-                                                val dy = accY / size.height
+                                                val sendX = sX * (coalesceMs / 1000f) + residX * 0.35f
+                                                val sendY = sY * (coalesceMs / 1000f) + residY * 0.35f
+                                                residX *= 0.65f; residY *= 0.65f
+                                                val dx = sendX / size.width
+                                                val dy = sendY / size.height
                                                 ws.send(
                                                     """{"t":"pad","dx":${"%.4f".format(dx)},"dy":${"%.4f".format(dy)}}"""
                                                 )
@@ -643,24 +656,42 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                                     }
                                     // touchpad glide: keep coasting at the smoothed
                                     // speed, decaying, like a finger lifting off a
-                                    // real trackpad. Local only (cloud RTT kills
-                                    // the effect).
-                                    if (!ws.isRemote && (kotlin.math.abs(sX) > 120f || kotlin.math.abs(sY) > 120f)) {
-                                        val gs = sX; val gs2 = sY
+                                    // real trackpad. Also drains whatever distance
+                                    // the easing hadn't caught up to yet.
+                                    // Local only (cloud RTT kills the effect).
+                                    val glidePxX = sX; val glidePxY = sY
+                                    val residueX = residX; val residueY = residY
+                                    sX = 0f; sY = 0f; residX = 0f; residY = 0f
+                                    if (!ws.isRemote && (kotlin.math.abs(glidePxX) > 80f || kotlin.math.abs(glidePxY) > 80f || kotlin.math.abs(residueX) > 20f || kotlin.math.abs(residueY) > 20f)) {
                                         Thread {
-                                            var gX = gs * 0.85f
-                                            var gY = gs2 * 0.85f
-                                            repeat(14) {
+                                            var gX = glidePxX * 0.8f
+                                            var gY = glidePxY * 0.8f
+                                            var rX = residueX
+                                            var rY = residueY
+                                            // move r toward 0, bounded by the coasting speed
+                                            fun drain(r: Float, g: Float): Float {
+                                                if (r == 0f) return 0f
+                                                val cap = kotlin.math.abs(g) * 0.016f * 1.2f
+                                                return when {
+                                                    r > cap -> cap
+                                                    r < -cap -> -cap
+                                                    else -> r
+                                                }
+                                            }
+                                            for (_i in 0 until 24) {
                                                 Thread.sleep(16)
-                                                if (kotlin.math.abs(gX) > 20f || kotlin.math.abs(gY) > 20f) {
+                                                val dX = drain(rX, gX)
+                                                val dY = drain(rY, gY)
+                                                if (kotlin.math.abs(dX) > 1f || kotlin.math.abs(dY) > 1f) {
                                                     ws.send(
-                                                        """{"t":"pad","dx":${"%.4f".format(gX * 0.016f / size.width)},"dy":${"%.4f".format(gY * 0.016f / size.height)}}"""
+                                                        """{"t":"pad","dx":${"%.4f".format(dX / size.width)},"dy":${"%.4f".format(dY / size.height)}}"""
                                                     )
                                                 }
-                                                gX *= 0.8f; gY *= 0.8f
+                                                rX -= dX; rY -= dY
+                                                gX *= 0.86f; gY *= 0.86f
+                                                if (kotlin.math.abs(gX) < 5f && kotlin.math.abs(gY) < 5f && kotlin.math.abs(rX) < 5f && kotlin.math.abs(rY) < 5f) break
                                             }
                                         }.start()
-                                        sX = 0f; sY = 0f
                                     }
                                     pressStart = 0L; maxActive = 0; movedPastSlop = false
                                     lastPos = null; lastTwoY = null
@@ -714,14 +745,11 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
         var basePSum = 0f
         var baseRSum = 0f
         var calibrated = false
-        var lastRoll = 0f
-        var lastPitch = 0f
-        var haveLast = false
-        // laser gain: radian-of-tilt-velocity (per second) -> screen-widths/s.
-        // ~0.6 rad/s gentle wave crosses the screen in ~1.4 s.
-        val gain = 1.3f
-        // per-frame tilt delta smaller than this is hand/shelf noise, not a wave
-        val frameDead = 0.0025f
+        // laser: cursor speed = tilt offset past the deadzone (radians) × gain
+        // (screen-widths per second per radian). 20° corner-press ≈ 0.35 rad
+        // offset → ~0.3 rad excess → ~1 s to cross the screen at gain 3.0.
+        val offsetDead = 0.05f  // ~3° — shelf/hand noise
+        val gain = 3.0f
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
                 val now = SystemClock.elapsedRealtime()
@@ -744,31 +772,28 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
                     baseR = baseRSum / baseN
                     calibrated = true
                     calibrating = false
-                    haveLast = false
                 }
                 if (now - lastSend < 33L) return
+                val dtEv = (now - lastSend) / 1000f
                 lastSend = now
-                // tilt offset from the calibrated neutral, velocity between frames
-                val dr = if (haveLast) roll - lastRoll else 0f
-                val dp = if (haveLast) pitch - lastPitch else 0f
-                lastRoll = roll; lastPitch = pitch; haveLast = true
-                // deadzone noise that isn't a real wave
-                val dX = if (kotlin.math.abs(dr) > frameDead) (dr - if (dr > 0) frameDead else -frameDead) * gain else 0f
-                val dY = if (kotlin.math.abs(dp) > frameDead) (dp - if (dp > 0) frameDead else -frameDead) * gain else 0f
-                if (dX == 0f && dY == 0f) {
-                    // motion stopped: decay the dot back to center
-                    dotX *= 0.6f; dotY *= 0.6f
-                    if (kotlin.math.abs(dotX) < 0.01f) dotX = 0f
-                    if (kotlin.math.abs(dotY) < 0.01f) dotY = 0f
-                    return
-                }
-                ws.send("""{"t":"pad","dx":${"%.4f".format(dX)}, "dy":${"%.4f".format(dY)}}""")
-                // on-screen dot = smoothed velocity indicator (not a position — it
-                // always decays home, so RESET AIM can never "snap back")
-                val nx = (dX * 4f).coerceIn(-0.5f, 0.5f)
-                val ny = (dY * 4f).coerceIn(-0.5f, 0.5f)
-                dotX = 0.5f * dotX + 0.5f * nx
-                dotY = 0.5f * dotY + 0.5f * ny
+                // LASER MODEL: cursor speed = how far the phone is held off
+                // its neutral pose (offset past the deadzone), like pressing
+                // down on one corner of a phone lying on a desk: hold the
+                // tilt -> the cursor glides steadily that direction; level it
+                // -> it stops where it is. No integration, so nothing snaps
+                // back; relative "pad" deltas ride the 60 Hz interpolation pump.
+                val exX = roll - baseR          // signed offset from neutral
+                val exY = pitch - baseP
+                val offX = if (kotlin.math.abs(exX) > offsetDead) exX - if (exX > 0) offsetDead else -offsetDead else 0f
+                val offY = if (kotlin.math.abs(exY) > offsetDead) exY - if (exY > 0) offsetDead else -offsetDead else 0f
+                val dX = gain * offX * dtEv      // screen-widths this tick
+                val dY = gain * offY * dtEv
+                if (dX == 0f && dY == 0f) return
+                ws.send("""{"t":"pad","dx":${"%.5f".format(dX)},"dy":${"%.5f".format(dY)}}""")
+                // on-screen dot = tilt offset (joystick ball): where you're
+                // "pointing" relative to neutral; back to center when level.
+                dotX = (offX / 0.45f).coerceIn(-1f, 1f) * 0.42f
+                dotY = (offY / 0.45f).coerceIn(-1f, 1f) * 0.42f
             }
 
             override fun onAccuracyChanged(e: Sensor?, a: Int) {}
@@ -900,10 +925,11 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
         err = null
         busy = true
         Thread {
-            // AAC first (best whisper fidelity); fall back to AMR if the
-            // device's audio HAL rejects it. Explicit samplerate/channels —
-            // leaving them implicit is what breaks prepare() on Exynos.
+            // OPUS/OGG first — whisper's native format (PyAV decodes it
+            // reliably). AAC second (best fidelity when OPUS is missing).
+            // AMR-NB last (many bytes too small for whisper, but works).
             val cfgs = listOf(
+                intArrayOf(OutputFormat.OGG, AudioEncoder.OPUS, 48000, 32 * 1000),
                 intArrayOf(OutputFormat.MPEG_4, AudioEncoder.AAC, 44100, 128 * 1000),
                 intArrayOf(OutputFormat.DEFAULT, AudioEncoder.AMR_NB, 8000, 12 * 1000),
             )
@@ -939,24 +965,26 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
         recHolder.r = null
         busy = false
         if (r == null) return
-        val dur = SystemClock.elapsedRealtime() - recHolder.start
+        val startTs = recHolder.start
+        val dur = if (startTs > 0L) SystemClock.elapsedRealtime() - startTs else -1L
         Thread {
             try { r.stop() } catch (_: Exception) {}
             r.release()
             val bytes = if (file.exists()) file.readBytes() else ByteArray(0)
             file.delete()
-            // AMR-NB fallback encodes ~1.5 KB/s, so a 2 s clip is only ~3 KB —
-            // a high byte floor used to flag legit recordings "too short".
-            // Only reject clips that are genuinely empty/fragmented.
-            if (dur < 700L || bytes.size < 1024) {
-                main.post { err = "too short — hold the mic ~1 second or more" }
+            // Diagnostics in the error itself so the phone tells us what
+            // actually happened (duration, codec, byte count).
+            if (dur < 500L) {
+                main.post { err = "too short (${dur}ms) — hold the mic ~1 second or more" }
                 return@Thread
             }
+            // Even a small clip may still transcribe — send it rather than
+            // guessing; whisper says "empty" honestly if it can't.
             val sent = ws.sendAudio(bytes)
             if (sent > 0) {
                 ws.send(TetherWs.AUDIO_DONE)
             } else {
-                main.post { err = "audio not sent — link may have dropped, tap again" }
+                main.post { err = "audio not sent (${dur}ms, ${bytes.size}B) — link may have dropped, tap again" }
             }
         }.start()
     }
