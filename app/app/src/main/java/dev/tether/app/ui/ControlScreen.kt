@@ -350,11 +350,11 @@ private fun UpdateRow(ctx: android.content.Context) {
             }
             "error" -> {
                 Text(AutoUpdater.message, color = Faint, fontSize = 9.sp, modifier = Modifier.weight(1f).padding(end = 8.dp), maxLines = 1)
-                UpdateChip("CHECK", host.isNotBlank()) { startUpdateCheck(ctx, host) }
+                UpdateChip("CHECK", true) { startUpdateCheck(ctx, host) }
             }
             else -> {
                 Text("", modifier = Modifier.weight(1f))
-                UpdateChip("CHECK", host.isNotBlank()) { startUpdateCheck(ctx, host) }
+                UpdateChip("CHECK", true) { startUpdateCheck(ctx, host) }
             }
         }
     }
@@ -376,9 +376,20 @@ private fun UpdateChip(label: String, enabled: Boolean, onClick: () -> Unit) {
 }
 
 private fun startUpdateCheck(ctx: android.content.Context, host: String) {
-    if ((host.isBlank() && Prefs.upd(ctx).isBlank()) || AutoUpdater.state in listOf("checking", "downloading")) return
+    if (AutoUpdater.state in listOf("checking", "downloading")) return
     Thread {
-        AutoUpdater.check(ctx, host, Prefs.upd(ctx).ifBlank { null })?.let { rel -> AutoUpdater.download(ctx, rel) { } }
+        // Refresh the discovery relay first — it may now carry live cloud
+        // endpoints even when this phone has never paired with this laptop.
+        AutoUpdater.refreshRelay(ctx)
+        val upd = Prefs.upd(ctx)
+        if (host.isBlank() && upd.isBlank()) {
+            AutoUpdater.state = "error"
+            AutoUpdater.message = "no update source (laptop off or relay down)"
+            return@Thread
+        }
+        AutoUpdater.check(ctx, host, upd.ifBlank { null })?.let { rel ->
+            AutoUpdater.download(ctx, rel) { }
+        }
     }.start()
 }
 

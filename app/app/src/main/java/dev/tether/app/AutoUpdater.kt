@@ -16,9 +16,18 @@ import java.security.MessageDigest
  * (port 8400): tether.json describes the newest build, tether.apk is the
  * artifact. Both ride the same transport as the bridge (LAN/hotspot/tailnet),
  * so an update never needs a second network path.
+ *
+ * Discovery relay: the laptop's tunnel guard publishes the LIVE cloud
+ * update/bridge URLs to a public Gist on every tunnel (re)start. Polling it
+ * lets a phone CHECK for updates — and later discover the remote bridge —
+ * with NO prior pairing and no LAN access. The URLs it carries are ephemeral
+ * quick-tunnel links, so nothing sensitive is exposed.
  */
 object AutoUpdater {
     const val UPDATE_PORT = 8400
+    /** Stable relay URL baked into every build (published by tools/tunnel_guard.py). */
+    const val RELAY_RAW =
+        "https://gist.githubusercontent.com/Yashop965/98c806c159f0a914987adcfdb467098e/raw"
 
     data class Release(
         val versionCode: Int,
@@ -28,11 +37,39 @@ object AutoUpdater {
         val size: Long,
     )
 
+    /** Live cloud endpoints fetched from the relay (null fields = unavailable). */
+    data class RelayUrls(val wss: String?, val upd: String?)
+
     val main = Handler(Looper.getMainLooper())
     @Volatile var progress = -1            // -1 idle, 0..100 downloading
     @Volatile var state = "idle"           // idle | checking | downloading | ready | error
     @Volatile var message = ""
     @Volatile var readyFile: File? = null
+
+    /** Poll the relay and save its live cloud URLs (wss + upd) to Prefs.
+     *  Returns the fresh URLs, or null if the relay is unreachable (caller
+     *  falls back to whatever Prefs already hold). Run from a worker. */
+    fun refreshRelay(ctx: Context): RelayUrls? {
+        try {
+            // cache-bust: gist raw is CDN-cached; a per-call query forces a hit
+            val url = "$RELAY_RAW?cb=${System.currentTimeMillis()}"
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 8000; conn.readTimeout = 8000
+            if (conn.responseCode != 200) { conn.disconnect(); return null }
+            val o = org.json.JSONObject(conn.inputStream.bufferedReader().readText())
+            conn.disconnect()
+            val bridge = o.optString("bridge", "").trim()
+            val upd = o.optString("upd", "").trim()
+            val wss = if (bridge.isNotEmpty()) "wss://${bridge.removePrefix("https://")}" else null
+            if ((wss == null || wss.isBlank()) && (upd.isEmpty())) return null
+            wss?.let { Prefs.saveWss(ctx, it) }
+            if (upd.isNotEmpty()) Prefs.saveUpd(ctx, upd)
+            main.post { if (state == "checking") message = "relay: live endpoints found" }
+            return RelayUrls(wss, upd.ifEmpty { null })
+        } catch (e: Exception) {
+            return null
+        }
+    }
 
     /** Check for a newer build. Run from a worker.
      *  [updBase] is an optional full update-server base (e.g. an https cloud
