@@ -745,11 +745,15 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
         var basePSum = 0f
         var baseRSum = 0f
         var calibrated = false
-        // laser: cursor speed = tilt offset past the deadzone (radians) × gain
-        // (screen-widths per second per radian). 20° corner-press ≈ 0.35 rad
-        // offset → ~0.3 rad excess → ~1 s to cross the screen at gain 3.0.
-        val offsetDead = 0.05f  // ~3° — shelf/hand noise
-        val gain = 3.0f
+        var lastRoll = 0f
+        var lastPitch = 0f
+        var haveLast = false
+        // WAND LASER: cursor speed = tilt VELOCITY (change between sensor
+        // frames) × gain — swing the phone like a laser pointer: wave right,
+        // the cursor moves right; stop, it stays where it is. A small
+        // per-frame deadzone drops sensor noise without eating slow waves.
+        val gain = 4.5f          // screen-widths per radian of tilt-velocity
+        val frameDead = 0.0008f  // ~0.05°/event — noise floor, not slow waves
         val listener = object : SensorEventListener {
             override fun onSensorChanged(e: SensorEvent) {
                 val now = SystemClock.elapsedRealtime()
@@ -772,28 +776,30 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
                     baseR = baseRSum / baseN
                     calibrated = true
                     calibrating = false
+                    haveLast = false
                 }
                 if (now - lastSend < 33L) return
-                val dtEv = (now - lastSend) / 1000f
                 lastSend = now
-                // LASER MODEL: cursor speed = how far the phone is held off
-                // its neutral pose (offset past the deadzone), like pressing
-                // down on one corner of a phone lying on a desk: hold the
-                // tilt -> the cursor glides steadily that direction; level it
-                // -> it stops where it is. No integration, so nothing snaps
-                // back; relative "pad" deltas ride the 60 Hz interpolation pump.
-                val exX = roll - baseR          // signed offset from neutral
-                val exY = pitch - baseP
-                val offX = if (kotlin.math.abs(exX) > offsetDead) exX - if (exX > 0) offsetDead else -offsetDead else 0f
-                val offY = if (kotlin.math.abs(exY) > offsetDead) exY - if (exY > 0) offsetDead else -offsetDead else 0f
-                val dX = gain * offX * dtEv      // screen-widths this tick
-                val dY = gain * offY * dtEv
-                if (dX == 0f && dY == 0f) return
+                // tilt velocity between frames, deadzoned
+                val dr = if (haveLast) roll - lastRoll else 0f
+                val dp = if (haveLast) pitch - lastPitch else 0f
+                lastRoll = roll; lastPitch = pitch; haveLast = true
+                val dX = if (kotlin.math.abs(dr) > frameDead) (dr - if (dr > 0) frameDead else -frameDead) * gain else 0f
+                val dY = if (kotlin.math.abs(dp) > frameDead) (dp - if (dp > 0) frameDead else -frameDead) * gain else 0f
+                if (dX == 0f && dY == 0f) {
+                    // motion stopped: dot decays back to center
+                    dotX *= 0.55f; dotY *= 0.55f
+                    if (kotlin.math.abs(dotX) < 0.01f) dotX = 0f
+                    if (kotlin.math.abs(dotY) < 0.01f) dotY = 0f
+                    return
+                }
                 ws.send("""{"t":"pad","dx":${"%.5f".format(dX)},"dy":${"%.5f".format(dY)}}""")
-                // on-screen dot = tilt offset (joystick ball): where you're
-                // "pointing" relative to neutral; back to center when level.
-                dotX = (offX / 0.45f).coerceIn(-1f, 1f) * 0.42f
-                dotY = (offY / 0.45f).coerceIn(-1f, 1f) * 0.42f
+                // on-screen dot = smoothed swing speed: flies with your hand,
+                // eases home when you stop — reset can never snap it back.
+                val vx = (dX * 12f).coerceIn(-0.45f, 0.45f)
+                val vy = (dY * 12f).coerceIn(-0.45f, 0.45f)
+                dotX = 0.5f * dotX + 0.5f * vx
+                dotY = 0.5f * dotY + 0.5f * vy
             }
 
             override fun onAccuracyChanged(e: Sensor?, a: Int) {}
