@@ -16,6 +16,10 @@ import java.util.concurrent.TimeUnit
  */
 class TetherWs(private val host: String, private val port: Int, private val token: String, private val remote: String? = null) {
 
+    /** True when the link rides the cloud tunnel (wss://) — higher RTT, so
+     *  UI code can coalesce harder than on a LAN link. */
+    val isRemote: Boolean get() = !remote.isNullOrBlank()
+
     interface Events {
         fun onConnected()
         fun onDisconnected()
