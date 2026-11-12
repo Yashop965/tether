@@ -48,7 +48,7 @@ object AutoUpdater {
 
     /** Poll the relay and save its live cloud URLs (wss + upd) to Prefs.
      *  Returns the fresh URLs, or null if the relay is unreachable (caller
-     *  falls back to whatever Prefs already hold). Run from a worker. */
+     *  falls back to whatever Prefs already holds). Run from a worker. */
     fun refreshRelay(ctx: Context): RelayUrls? {
         try {
             // cache-bust: gist raw is CDN-cached; a per-call query forces a hit
@@ -60,48 +60,70 @@ object AutoUpdater {
             conn.disconnect()
             val bridge = o.optString("bridge", "").trim()
             val upd = o.optString("upd", "").trim()
-            val wss = if (bridge.isNotEmpty()) "wss://${bridge.removePrefix("https://")}" else null
-            if ((wss == null || wss.isBlank()) && (upd.isEmpty())) return null
+            // guard-side parse bug can publish "https://api.trycloudflare.com"
+            // (an endpoint, not a tunnel) — never save that
+            fun ok(u: String) = u.startsWith("https://") && !u.contains("api.trycloudflare")
+            val bridgeOk = if (ok(bridge)) bridge else ""
+            val updOk = if (ok(upd)) upd else ""
+            val wss = if (bridgeOk.isNotEmpty()) "wss://${bridgeOk.removePrefix("https://")}" else null
+            if ((wss == null || wss.isBlank()) && updOk.isEmpty()) return null
             wss?.let { Prefs.saveWss(ctx, it) }
-            if (upd.isNotEmpty()) Prefs.saveUpd(ctx, upd)
+            if (updOk.isNotEmpty()) Prefs.saveUpd(ctx, updOk)
             main.post { if (state == "checking") message = "relay: live endpoints found" }
-            return RelayUrls(wss, upd.ifEmpty { null })
+            return RelayUrls(wss, updOk.ifEmpty { null })
         } catch (e: Exception) {
             return null
         }
     }
 
     /** Check for a newer build. Run from a worker.
-     *  [updBase] is an optional full update-server base (e.g. an https cloud
-     *  tunnel from a pair QR's `u=`); without it we fall back to the bridge
-     *  host on port 8400 (LAN/hotspot/tailnet). */
+     *  Tries every reachable source: the relay/cloud update base first
+     *  (works from any network), then the paired LAN host. A quick-tunnel
+     *  URL can go stale between checks — so one dead source must not
+     *  shadow the others. */
     fun check(ctx: Context, host: String, updBase: String? = null): Release? {
         state = "checking"; progress = -1
-        val base = (if (!updBase.isNullOrBlank()) updBase else "http://$host:$UPDATE_PORT").trimEnd('/')
-        val url = "$base/tether.json"
-        try {
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.connectTimeout = 5000; conn.readTimeout = 5000
-            if (conn.responseCode != 200) { state = "error"; message = "update server not reachable ($base)"; return null }
-            val json = conn.inputStream.bufferedReader().readText()
-            conn.disconnect()
-            val o = org.json.JSONObject(json)
-            val code = o.getInt("version_code")
-            if (code <= BuildConfig.VERSION_CODE) {
-                state = "idle"; message = "up to date (v${BuildConfig.VERSION_NAME})"
-                return null
-            }
-            return Release(
-                versionCode = code,
-                versionName = o.optString("version_name"),
-                apkUrl = "$base/" + o.optString("apk", "tether.apk"),
-                sha256 = o.optString("sha256"),
-                size = o.optLong("size"),
-            )
-        } catch (e: Exception) {
-            state = "error"; message = "check failed ($base): ${e.message}"
+        val bases = buildList {
+            if (!updBase.isNullOrBlank()) add(updBase)
+            if (host.isNotBlank()) add("http://$host:$UPDATE_PORT")
+        }.map { it.trimEnd('/') }.distinct().filter { it.isNotBlank() }
+        if (bases.isEmpty()) {
+            state = "error"; message = "no update source (pair or relay first)"
             return null
         }
+        var lastErr = ""
+        for (base in bases) {
+            try {
+                val url = "$base/tether.json"
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 6000; conn.readTimeout = 6000
+                val httpCode = conn.responseCode
+                if (httpCode != 200) {
+                    conn.disconnect()
+                    lastErr = "$base -> HTTP $httpCode"
+                    continue
+                }
+                val json = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+                val o = org.json.JSONObject(json)
+                val newCode = o.getInt("version_code")
+                if (newCode <= BuildConfig.VERSION_CODE) {
+                    state = "idle"; message = "up to date (v${BuildConfig.VERSION_NAME})"
+                    return null
+                }
+                return Release(
+                    versionCode = newCode,
+                    versionName = o.optString("version_name"),
+                    apkUrl = "$base/" + o.optString("apk", "tether.apk"),
+                    sha256 = o.optString("sha256"),
+                    size = o.optLong("size"),
+                )
+            } catch (e: Exception) {
+                lastErr = "$base -> ${(e.message ?: "unreachable").take(60)}"
+            }
+        }
+        state = "error"; message = "update unreachable (${bases.size} source(s): $lastErr)"
+        return null
     }
 
     /** Download + verify. Run from a worker thread; posts progress on main. */

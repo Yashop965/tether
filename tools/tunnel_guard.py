@@ -52,14 +52,24 @@ def kill_existing() -> None:
 
 
 def wait_url(path: Path, prev: str | None, timeout: int = 90) -> str | None:
-    """Tail cloudflared log until a (new) quick-tunnel URL appears."""
+    """Tail cloudflared log until a (new) quick-tunnel URL appears.
+
+    Rejects api.trycloudflare.com — cloudflared's log prints that API
+    endpoint during registration, and the regex would otherwise capture it
+    and publish a junk URL to the relay."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         m = None
         try:
             txt = path.read_text(encoding="utf-8", errors="replace")
             for m in reversed(list(URL_RE.finditer(txt))):
-                pass
+                if "api.trycloudflare.com" in m.group(0):
+                    m = None
+                break
+            if m is None:
+                # fall back to the last NON-api match in the log
+                hits = [x for x in URL_RE.finditer(txt) if "api.trycloudflare.com" not in x.group(0)]
+                m = hits[-1] if hits else None
         except FileNotFoundError:
             m = None
         if m and m.group(0) != prev:
@@ -84,9 +94,13 @@ def spawn(key: str, url: str | None) -> str | None:
 
 
 def write_state(urls: dict) -> None:
+    # never persist junk endpoint URLs as if they were tunnels
+    urls = {k: v for k, v in urls.items()
+            if v and "api.trycloudflare.com" not in v}
     STATE.write_text(json.dumps(urls, indent=2), encoding="utf-8")
     log(f"state: {urls}")
-    publish(urls)
+    if urls:
+        publish(urls)
 
 
 GIST_ID = "98c806c159f0a914987adcfdb467098e"

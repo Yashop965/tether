@@ -537,6 +537,10 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                 if (!up) return@pointerInput
                 var lastPos: Offset? = null
                 var lastTwoY: Float? = null
+                // per-finger y positions — a Move frame may report only ONE of
+                // the two pressed fingers, so "pressed[1]" crashes; the map is
+                // the source of truth for two-finger scroll.
+                val fingerY = mutableMapOf<Any, Float>()
                 var active = 0          // pointers currently pressed
                 var maxActive = 0       // peak simultaneous in this gesture
                 var pressStart = 0L
@@ -550,11 +554,18 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                 // LAN: 16 ms batches so the host's 60 Hz pump gets enough
                 // samples to interpolate; cloud: keep 33 ms (fewer hops).
                 val coalesceMs = if (ws.isRemote) 33L else 16L
+                // trackpad convention: finger swipe DOWN scrolls content down,
+                // i.e. pynput wheel "up" (negative). 25 px per wheel step.
+                val scrollPx = 25f
 
                 awaitPointerEventScope {
                     while (true) {
                         val ev = awaitPointerEvent()
                         val ch = ev.changes ?: continue
+                        // bookkeeping: who is pressed, where (y)
+                        for (c in ch) {
+                            if (c.pressed) fingerY[c.id] = c.position.y else fingerY.remove(c.id)
+                        }
                         when (ev.type) {
                             PointerEventType.Press -> {
                                 active++
@@ -563,20 +574,19 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                                 if (active == 1) { lastPos = ch[0].position; lastTwoY = null }
                             }
                             PointerEventType.Move -> {
-                                val pressed = ch.filter { it.pressed }
                                 when {
-                                    active == 2 || pressed.size >= 2 -> {
-                                        val cy = (pressed[0].position.y + pressed[1].position.y) / 2f
+                                    fingerY.size >= 2 -> {
+                                        val cy = fingerY.values.sum() / fingerY.size
                                         lastTwoY?.let {
-                                            val steps = ((cy - it) / 40f).toInt()
-                                            if (steps != 0) ws.send("""{"t":"scroll","dy":$steps}""")
+                                            val steps = (((cy - it) / scrollPx)).toInt()
+                                            if (steps != 0) ws.send("""{"t":"scroll","dy":${-steps}}""")
                                         }
                                         lastTwoY = cy
                                         lastPos = null
                                         movedPastSlop = true
                                     }
-                                    active == 1 && pressed.isNotEmpty() -> {
-                                        val p = pressed[0]
+                                    active == 1 && fingerY.size == 1 -> {
+                                        val p = ch.firstOrNull { it.pressed } ?: continue
                                         val prev = lastPos
                                         if (prev != null) {
                                             accX += p.position.x - prev.x
