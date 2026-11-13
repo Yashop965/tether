@@ -1,5 +1,6 @@
 name: tether
 version: 1.7.0
+allow_gateway_injection: true
 description: >-
   Use your phone as a remote trackpad, tilt-laser, and voice terminal for the
   host. Tether runs a LAN bridge that drives the host cursor and transcribes
