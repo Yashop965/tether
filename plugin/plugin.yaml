@@ -1,7 +1,7 @@
 name: tether
-version: 1.5.3
+version: 1.7.0
 description: >-
-  Use your phone as a remote trackpad, tilt-mouse, and voice terminal for the
+  Use your phone as a remote trackpad, tilt-laser, and voice terminal for the
   host. Tether runs a LAN bridge that drives the host cursor and transcribes
   voice notes straight into a Hermes session (local Whisper, no cloud).
 provides_tools:
@@ -12,3 +12,9 @@ python_dependencies:
   - "websockets>=12"
   - "pynput>=1.7"
   - "faster-whisper>=1"
+changelog:
+  1.7.0: protocol trimmed to what the app actually sends (pad/click/scroll/
+    audio/pause; dropped the vestigial UDP fast channel, aim, and tilt-drift
+    branches — no client ever used them), idle-wedge click swallow,
+    pause-state broadcast, STT decode-failure surfacing + model warmup,
+    threaded static server for the update port.

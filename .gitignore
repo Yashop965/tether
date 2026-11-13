@@ -1,6 +1,9 @@
 # build output
 app/build/
+app/app/build/
 app/.gradle/
+.gradle/
+out/
 *.log
 # generated python
 __pycache__/
@@ -8,9 +11,16 @@ __pycache__/
 plugin/_data/
 # generated serving artifacts (rebuilt by tools/update_serve.py + tools/pairing_serve.py)
 tools/apkserve/
-# os
+# live state — regenerated at runtime, never source (bridge token was
+# committed in early history — rotated, untracked now)
+tools/bridge.token
+tools/tunnels.json
+tools/.cloudflared_pids.json
+# os / editor
 Thumbs.db
 .DS_Store
+.idea/
+*.iml
 tools/.bridge_guard.pid
 tools/.tunnel_guard.pid
 tools/_gist_test.json

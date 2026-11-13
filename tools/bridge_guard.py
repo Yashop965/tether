@@ -67,7 +67,7 @@ def reap_strays(lg: logging.Logger) -> None:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | Where-Object { "
-             "($_.CommandLine -match '_local_run|http.server') -and "
+             "($_.CommandLine -match '_local_run|http_serve') -and "
              "($_.Name -match 'python') } | ForEach-Object { "
              "$_.ProcessId.ToString() }"],
             capture_output=True, text=True, timeout=45,
@@ -97,13 +97,14 @@ def start_bridge(token: str, lg: logging.Logger) -> subprocess.Popen | None:
 
 
 def start_http(lg: logging.Logger) -> None:
+    # ThreadingHTTPServer (tools/http_serve.py): a 30 MB APK download must
+    # not hold up the manifest/QR requests that share port 8400.
     flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
              | getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    proc = subprocess.Popen([sys.executable, "-m", "http.server", str(HTTP_PORT),
-                             "--bind", "0.0.0.0"],
-                           cwd=str(APKSERVE),
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=flags)
+    proc = subprocess.Popen([sys.executable, str(REPO / "tools" / "http_serve.py"),
+                             str(HTTP_PORT), str(APKSERVE)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=flags)
     lg.info("http spawned pid=%s", proc.pid)
 
 

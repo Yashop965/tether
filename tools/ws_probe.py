@@ -4,7 +4,6 @@
     python tools/ws_probe.py --token T move --dx 0.02 --dy 0.01
     python tools/ws_probe.py --token T click --button left
     python tools/ws_probe.py --token T scroll --scroll -3
-    python tools/ws_probe.py --token T tilt --dx 0.4 --dy 0.1
     python tools/ws_probe.py --token T pause | resume
     python tools/ws_probe.py --token T voice --file clip.webm
     python tools/ws_probe.py --token T hello --expect-reject     # A6: bad token refused
@@ -28,7 +27,7 @@ def parse() -> argparse.Namespace:
     ap.add_argument("--port", type=int, default=8377)
     ap.add_argument("--token", required=True)
     ap.add_argument("--cmd", "-c", default="hello",
-                    choices=["hello", "move", "click", "scroll", "tilt", "pause", "resume", "state", "voice"])
+                    choices=["hello", "move", "click", "scroll", "pause", "resume", "state", "voice"])
     ap.add_argument("--dx", type=float, default=0.02)
     ap.add_argument("--dy", type=float, default=0.0)
     ap.add_argument("--button", default="left", choices=["left", "right", "middle"])
@@ -57,12 +56,6 @@ async def run(args: argparse.Namespace, token: str) -> int:
         elif args.cmd == "scroll":
             await ws.send(json.dumps({"t": "scroll", "dy": args.scroll}))
             print("scroll sent:", args.scroll)
-        elif args.cmd == "tilt":
-            for i in range(30):
-                x = args.dx + 0.4 * ((i % 10) - 5) / 5
-                await ws.send(json.dumps({"t": "tilt", "x": x, "y": args.dy, "active": i < 25}))
-                await asyncio.sleep(1 / 30)
-            print("tilt burst sent")
         elif args.cmd in ("pause", "resume"):
             await ws.send(json.dumps({"t": args.cmd}))
             resp = await asyncio.wait_for(recv_json(ws), 3)

@@ -1,0 +1,6 @@
+{
+  "gist_id": "98c806c159f0a914987adcfdb467098e",
+  "gist_owner": "Yashop965",
+  "ntfy_topic": "tether-lab-updates",
+  "note": "Public discovery relay: the laptop publishes live cloud-tunnel URLs here; the phone app GETs gist_raw_url to self-update without a prior LAN pairing. The SAME gist id/owner is compiled into the app (app/app/.../AutoUpdater.kt RELAY_RAW) — rotate BOTH together; the app only picks up the new one after an APK rebuild."
+}

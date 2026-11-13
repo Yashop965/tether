@@ -1,13 +1,10 @@
 """Tether LAN bridge: WebSocket control channel + voice-to-session pipeline.
 
 Protocol (JSON text frames + binary audio frames), phone -> host:
-  {"t":"hello"}                      -> {"t":"hello_ok","port":...,"session":...}
+  {"t":"hello"}                      -> {"t":"hello_ok","port":...,"paused":...}
   {"t":"pad","dx":0.02,"dy":-0.01}  relative cursor move (normalized deltas)
   {"t":"click","b":"left"}          click (left/right/middle)
   {"t":"scroll","dy":-3}            scroll
-  {"t":"tilt","x":0.12,"y":-0.05}   continuous drift while tilt is active
-  {"t":"tilt","active":false}       release
-  {"t":"aim","x":0.5,"y":-0.3}     laser pointer: absolute screen aim (-1..1, 0,0=center)
   {"t":"audio_done"}                end of a binary audio stream
   {"t":"pause"} / {"t":"resume"}    manual cursor gate
 Host -> phone:
@@ -15,15 +12,6 @@ Host -> phone:
   {"t":"stt_pending"}
   {"t":"stt_error","error":"..."}
   {"t":"state","paused":true,"idle_paused":true}
-
-Fast input channel (UDP, port+1) — same semantics, ~9-byte packets, no TCP
-head-of-line blocking; best over Wi-Fi/hotspot/WireGuard. Handshake first
-datagram: "TTHR1" + token (text, UTF-8). Then, from that peer only:
-  0x01 <ff> dx dy     pad relative move (normalized, same scale as WS)
-  0x02 <ff> x y       aim absolute (-1..1, 0,0 = screen center)
-  0x03 <B> b          click: 0=left 1=right 2=middle
-  0x04 <h> dy        scroll
-  0x05 <i> nonce     RTT probe — server echoes the packet back
 """
 from __future__ import annotations
 
@@ -67,13 +55,16 @@ class TetherServer:
             sensitivity=float(settings.get("sensitivity", 1.0)),
             idle_seconds=int(settings.get("idle_seconds", 25)),
         )
-        self.stt = Transcriber(model_size=str(settings.get("stt_model", "base")))
+        self.stt = Transcriber(
+            model_size=str(settings.get("stt_model", "base")),
+            device=str(settings.get("stt_device", "cpu")),
+            compute_type=str(settings.get("stt_compute", "int8")),
+        )
         self.clients: dict[Any, _Client] = {}
         self.transcripts: list[dict[str, Any]] = []
         self._loop: Any = None
         self._thread: threading.Thread | None = None
         self._server: Any = None
-        self._tilt_active = False
         self._started_at = time.time()
 
     # ------------------------------------------------------------------ ctx
@@ -215,7 +206,8 @@ class TetherServer:
         if not cands:
             cands = [{"kind": "local", "ip": "127.0.0.1", "name": "loopback"}]
         print(f"Tether pairing — port {self.port}, token {self.token}")
-        print("Fastest first: phone hotspot/USB-tether beats same LAN, which beats Tailscale.")
+        print("Fastest first: laptop hotspot / USB-tether beats same-Wi-Fi LAN; the")
+        print("tailnet IP (100.x) is the stable pairing target when networks keep changing.")
         print()
         for c in cands:
             print(f"  [{c['kind']:>11}] {c['ip']}   ({c['name']})")
@@ -226,8 +218,13 @@ class TetherServer:
         try:
             import qrcode
 
-            img = qrcode.make(payload)
-            img.print_ascii(invert=True)
+            # qrcode.make() returns a PIL image (no print_ascii) when Pillow
+            # is installed — use the QRCode object directly so the terminal
+            # QR prints regardless of the image backend.
+            qr = qrcode.QRCode()
+            qr.add_data(payload)
+            qr.make()
+            qr.print_ascii(invert=True)
             print("\nScan with the Tether app's camera to pair in one tap.")
         except ImportError:
             print("(install 'qrcode' for QR output: pip install qrcode)")
@@ -414,65 +411,17 @@ class TetherServer:
             self.stt.warmup()
         except Exception:  # noqa: BLE001
             pass
-        try:
-            self._udp_socket = self._make_udp_socket()
-        except OSError as exc:
-            logger.warning("tether: UDP fast channel unavailable (%s:8378)", exc)
-            self._udp_socket = None
-        if self._udp_socket is not None:
-            threading.Thread(target=self._udp_loop, name="tether-udp", daemon=True).start()
-        logger.info("tether: bridge listening on %s:%s (UDP fast channel on %s:%s)",
-                    self.host, self.port, self.host, self.port + 1)
+        logger.info("tether: bridge listening on %s:%s", self.host, self.port)
 
-    # -------------------------------------------------------------- udp fast
-    def _make_udp_socket(self):
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.host, self.port + 1))
-        sock.settimeout(1.0)
-        return sock
-
-    def _udp_loop(self) -> None:
-        import socket
-        import struct
-        authed: dict = {}  # peer -> auth time
-        UDP_TTL = 300.0
-        while True:
+    def stop(self) -> None:
+        """Graceful teardown: stop the pump, close the WS server loop."""
+        self.mouse.stop_pump()
+        if self._loop and self._thread:
             try:
-                data, peer = self._udp_socket.recvfrom(2048)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            now = time.time()
-            for k in [k for k, t in authed.items() if now - t > UDP_TTL]:
-                authed.pop(k, None)
-            if data.startswith(b"TTHR1"):
-                tok = data[5:].decode("utf-8", "replace").strip()
-                if tok == self.token:
-                    authed[peer] = now
-                    logger.info("tether: udp auth from %s", peer)
-                continue
-            if peer not in authed or len(data) < 2:
-                continue
-            t, payload = data[0], data[1:]
-            if t == 1 and len(payload) >= 8:
-                dx, dy = struct.unpack("<ff", payload[:8])
-                self.mouse.queue_move(dx, dy)
-            elif t == 2 and len(payload) >= 8:
-                x, y = struct.unpack("<ff", payload[:8])
-                self.mouse.aim(x, y)
-            elif t == 3:
-                self.mouse.click(("left", "right", "middle")[payload[0] % 3])
-            elif t == 4 and len(payload) >= 2:
-                (dy,) = struct.unpack("<h", payload[:2])
-                self.mouse.scroll(dy)
-            elif t == 5:
-                try:
-                    self._udp_socket.sendto(data, peer)  # RTT echo
-                except OSError:
-                    pass
+                self._loop.call_soon_threadsafe(lambda: None)
+            except RuntimeError:
+                pass
+        self._thread = None
 
     def _run_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -544,23 +493,12 @@ class TetherServer:
             self.mouse.click(str(msg.get("b", "left")), swallow_wedge_clear=True)
         elif kind == "scroll":
             self.mouse.scroll(int(msg.get("dy", 0)))
-        elif kind == "tilt":
-            if msg.get("active") is False:
-                self._tilt_active = False
-            else:
-                self._tilt_active = True
-                self.mouse.queue_move(
-                    float(msg.get("x", 0.0)) * 0.02 * self.mouse.sensitivity,
-                    float(msg.get("y", 0.0)) * 0.02 * self.mouse.sensitivity,
-                )
-        elif kind == "aim":
-            self.mouse.aim(float(msg.get("x", 0.0)), float(msg.get("y", 0.0)))
         elif kind == "pause":
             self.mouse.pause()
-            await self._broadcast({"t": "state", "paused": True})
+            self._broadcast({"t": "state", "paused": True})
         elif kind == "resume":
             self.mouse.resume()
-            await self._broadcast({"t": "state", "paused": False})
+            self._broadcast({"t": "state", "paused": False})
         elif kind == "state_req":
             await self._send(ws, {
                 "t": "state",

@@ -83,6 +83,12 @@ fun ControlScreen() {
     var connErr by remember { mutableStateOf<String?>(null) }
     var scan by remember { mutableStateOf(false) }
     var wifiMsg by remember { mutableStateOf<String?>(null) }
+    // Peak-end: the moment of pairing is the experience's peak — mark it
+    // with a short confirmation instead of the dot silently turning white.
+    var linkFlash by remember { mutableStateOf(false) }
+    LaunchedEffect(up) {
+        if (up) { linkFlash = true; delay(4000); linkFlash = false }
+    }
 
     // mic permission: requested when the user enters voice mode
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -201,7 +207,7 @@ fun ControlScreen() {
                 // stop / resume the laptop cursor gate (only makes sense while linked)
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(44.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .border(width = 1.dp, color = if (paused) Color.White else Color(0xFF333333))
                         .background(if (paused) Color.White else Color.Black)
@@ -211,7 +217,7 @@ fun ControlScreen() {
                         },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(if (paused) "ON" else "OFF", color = if (paused) Color.Black else Dim, fontSize = 9.sp, letterSpacing = 1.sp)
+                    Text(if (paused) "ON" else "OFF", color = if (paused) Color.Black else Dim, fontSize = 10.sp, letterSpacing = 1.sp)
                 }
             }
         }
@@ -228,6 +234,16 @@ fun ControlScreen() {
                     .padding(horizontal = 18.dp, vertical = 4.dp),
             )
         }
+        if (linkFlash) {
+            Text(
+                "LINKED — move the phone to move the cursor",
+                color = Color(0xFF88CC88),
+                fontSize = 10.sp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 4.dp),
+            )
+        }
 
         // ------------------------------------------------------ mode pills
         Row(
@@ -235,7 +251,11 @@ fun ControlScreen() {
                 .fillMaxWidth()
                 .padding(horizontal = 18.dp),
         ) {
-            listOf("pad", "tilt", "voice").forEach { m ->
+            listOf("pad", "voice", "tilt").forEach { m ->
+                // Serial position: the niche mode (TILT/wand) goes to the
+                // middle "lost" slot; the daily driver (VOICE) takes the
+                // remembered end slot. Pills are dead targets while offline
+                // — dim them so the eye goes to SCAN QR instead (Hick's).
                 val on = mode == m
                 Box(
                     modifier = Modifier
@@ -244,13 +264,17 @@ fun ControlScreen() {
                         .clip(RoundedCornerShape(999.dp))
                         .background(if (on) Color.White else Color.Black)
                         .border(width = 1.dp, color = if (on) Color.White else Line)
-                        .clickable { mode = m }
+                        .clickable(enabled = up) { mode = m }
                         .padding(vertical = 9.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         m.uppercase(),
-                        color = if (on) Color.Black else Dim,
+                        color = when {
+                            on -> Color.Black
+                            up -> Dim
+                            else -> Color(0xFF444444)
+                        },
                         fontSize = 11.sp,
                         letterSpacing = 3.sp,
                     )
@@ -267,24 +291,28 @@ fun ControlScreen() {
         }
 
         // ------------------------------------------------- bottom strip
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 12.dp),
-        ) {
-            Text("LAST NOTE", color = Faint, fontSize = 9.sp, letterSpacing = 2.sp)
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = when {
-                    note == null && noteSent == null -> "—"
-                    noteSent == true -> note + "  ✓"
-                    else -> note ?: "—"
-                },
-                color = if (noteSent == false) Color(0xFFCC4444) else Color.White,
-                fontSize = 11.sp,
-                modifier = Modifier.weight(1f),
-                maxLines = 2,
-            )
+        // Miller's: a fresh session shows "—" — a dead chunk on every screen.
+        // The strip earns its space only once a note (or an error) exists;
+        // the VOICE surface already shows its own progress meanwhile.
+        if (note != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+            ) {
+                Text("LAST NOTE", color = Faint, fontSize = 9.sp, letterSpacing = 2.sp)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = when {
+                        noteSent == true -> note + "  ✓"
+                        else -> note ?: "—"
+                    },
+                    color = if (noteSent == false) Color(0xFFCC4444) else Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                )
+            }
         }
 
         // ------------------------------------------------- in-app update row
@@ -347,11 +375,11 @@ private fun UpdateRow(ctx: android.content.Context) {
                             val f = AutoUpdater.readyFile
                             if (f != null) AutoUpdater.install(ctx, f)
                         }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(horizontal = 12.dp, vertical = 14.dp),
                 )
             }
             "error" -> {
-                Text(AutoUpdater.message, color = Faint, fontSize = 9.sp, modifier = Modifier.weight(1f).padding(end = 8.dp), maxLines = 1)
+                Text(AutoUpdater.message, color = Color(0xFFCC4444), fontSize = 9.sp, modifier = Modifier.weight(1f).padding(end = 8.dp), maxLines = 1)
                 UpdateChip("CHECK", true) { startUpdateCheck(ctx, host) }
             }
             else -> {
@@ -364,16 +392,20 @@ private fun UpdateRow(ctx: android.content.Context) {
 
 @Composable
 private fun UpdateChip(label: String, enabled: Boolean, onClick: () -> Unit) {
+    // Fitts: the CHECK/RETRY chip was ~26dp tall — below the 44dp thumb
+    // minimum, at the bottom of the screen. Real target size, same look.
     Text(
         label,
-        color = if (enabled) Dim else Faint,
+        color = if (enabled) Color.Black else Dim,
         fontSize = 9.sp,
         letterSpacing = 2.sp,
         modifier = Modifier
+            .heightIn(min = 44.dp)
             .clip(RoundedCornerShape(6.dp))
-            .border(width = 1.dp, color = Line)
+            .border(width = 1.dp, color = if (enabled) Color(0xFF444444) else Line)
+            .background(if (enabled) Color.White else Color.Transparent)
             .clickable(enabled = enabled) { onClick() }
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 14.dp, vertical = 14.dp),
     )
 }
 
@@ -436,7 +468,25 @@ private fun LinkPanel(modifier: Modifier, connErr: String?, onScan: () -> Unit, 
             .border(width = 1.dp, color = LineDim)
             .padding(20.dp),
     ) {
-        Text(if (paired) "OFFLINE — RETRYING" else "NOT CONNECTED", color = Color.White, fontSize = 13.sp, letterSpacing = 3.sp)
+        // Zeigarnik: "RETRYING" alone is an open loop with no user agency.
+        // A RETRY chip closes it in one tap while the auto-reconnect keeps
+        // running underneath.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (paired) "OFFLINE" else "NOT CONNECTED", color = Color.White, fontSize = 13.sp, letterSpacing = 3.sp, modifier = Modifier.weight(1f))
+            if (paired && host.isNotBlank()) {
+                Text(
+                    "RETRY",
+                    color = Color.Black,
+                    fontSize = 9.sp,
+                    letterSpacing = 2.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.White)
+                        .clickable { onLink(Triple(host, port, token)) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+        }
         Text(
             if (paired) "reconnecting automatically · rescan the QR if the laptop moved networks"
             else "scan the QR on the laptop screen — one tap, no typing",
@@ -487,17 +537,29 @@ private fun LinkPanel(modifier: Modifier, connErr: String?, onScan: () -> Unit, 
                 LkField("PORT", port, modifier = Modifier.weight(1f)) { port = it; Prefs.save(ctx, host, port, token) }
                 LkField("TOKEN", token, modifier = Modifier.weight(1.6f).padding(start = 12.dp)) { token = it; Prefs.save(ctx, host, port, token) }
             }
+            // Doherty: a tap that does async work must answer in <0.5 s —
+            // show LINKING… immediately instead of a dead button for 1–3 s.
+            var linking by remember { mutableStateOf(false) }
+            LaunchedEffect(connErr) { if (connErr != null) linking = false }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 18.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .border(width = 1.dp, color = Color(0xFF444444))
-                    .clickable(enabled = host.isNotBlank()) { onLink(Triple(host, port, token)) }
+                    .clickable(enabled = host.isNotBlank() && !linking) {
+                        linking = true
+                        onLink(Triple(host, port, token))
+                    }
                     .padding(vertical = 11.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("LINK", color = Color(0xFFAAAAAA), fontSize = 12.sp, letterSpacing = 4.sp)
+                Text(
+                    if (linking) "LINKING…" else "LINK",
+                    color = if (host.isNotBlank()) (if (linking) Color(0xFF666666) else Color(0xFFAAAAAA)) else Color(0xFF555555),
+                    fontSize = 12.sp,
+                    letterSpacing = 4.sp,
+                )
             }
         }
     }
@@ -834,7 +896,6 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier, paused: Boolean = false) {
         if (sensor != null) sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
         onDispose {
             sm.unregisterListener(listener)
-            ws.send("""{"t":"tilt","active":false}""")
         }
     }
 
@@ -965,6 +1026,17 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
     val ctx = LocalContext.current
     var busy by remember { mutableStateOf(false) }
     var err by remember { mutableStateOf<String?>(null) }
+    // A whisper pass that runs >8s on the laptop is worth naming — "SLOW —
+    // tap to record again" is actionable; an endless "PROCESSING…" is not.
+    var procSlow by remember { mutableStateOf(false) }
+    LaunchedEffect(proc) {
+        if (!proc) { procSlow = false; return@LaunchedEffect }
+        var t = 0
+        while (proc) {
+            t++; if (t >= 8) procSlow = true
+            delay(500)
+        }
+    }
     val file = remember { File(ctx.cacheDir, "tether.m4a") }
     val main = remember { Handler(Looper.getMainLooper()) }
     // recorder + timestamps live in a volatile holder — created/stopped from
@@ -1149,7 +1221,7 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
             Text(
                 when {
                     err != null -> err.orEmpty()
-                    proc -> "PROCESSING…"
+                    proc -> "PROCESSING…${if (procSlow) " · SLOW — TAP TO RECORD AGAIN" else ""}"
                     busy -> "LISTENING… ${secs}s · TAP TO SEND"
                     !up -> "NOT CONNECTED"
                     else -> "TAP TO TALK"

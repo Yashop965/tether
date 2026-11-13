@@ -135,6 +135,28 @@ def spawn(key: str, url: str | None) -> str | None:
     return wait_url(logpath, url)
 
 
+RELAY_FILE = LOGDIR / "relay.json"
+DEFAULT_RELAY = {
+    "gist_id": "98c806c159f0a914987adcfdb467098e",
+    "gist_owner": "Yashop965",
+    "ntfy_topic": "tether-lab-updates",
+}
+
+
+def load_relay() -> dict:
+    """Public discovery relay config. Rotating the relay = editing this file
+    (and the app's compiled RELAY_RAW — see the 'note' inside relay.json)."""
+    try:
+        data = json.loads(RELAY_FILE.read_text(encoding="utf-8"))
+        return {**DEFAULT_RELAY, **data}
+    except Exception:  # noqa: BLE001
+        return dict(DEFAULT_RELAY)
+
+
+def relay_gist_raw(relay: dict) -> str:
+    return f"https://gist.githubusercontent.com/{relay['gist_owner']}/{relay['gist_id']}/raw"
+
+
 def write_state(urls: dict) -> None:
     # never persist junk endpoint URLs as if they were tunnels
     urls = {k: v for k, v in urls.items()
@@ -145,14 +167,12 @@ def write_state(urls: dict) -> None:
         publish(urls)
 
 
-GIST_ID = "98c806c159f0a914987adcfdb467098e"
-GIST_RAW = f"https://gist.githubusercontent.com/Yashop965/{GIST_ID}/raw"
-
-
 def publish(urls: dict) -> None:
-    """Push live tunnel URLs to a public relay so the phone app can discover
+    """Push live tunnel URLs to the public relay so the phone app can discover
     them WITHOUT a prior LAN/hotspot pairing. Primary: public Gist (the app
-    GETs GIST_RAW — stable URL baked into the APK). Fallback: ntfy.sh."""
+    GETs the raw URL — stable URL baked into the APK). Fallback: ntfy.sh."""
+    relay = load_relay()
+    gist_raw = relay_gist_raw(relay)
     # 1) Gist (verified read-side from the app's perspective)
     try:
         import tempfile
@@ -164,12 +184,12 @@ def publish(urls: dict) -> None:
         tf.write(payload)
         tf.close()
         r = subprocess.run(
-            ["gh", "api", "-X", "PATCH", f"gists/{GIST_ID}", "--input", tf.name],
+            ["gh", "api", "-X", "PATCH", f"gists/{relay['gist_id']}", "--input", tf.name],
             capture_output=True, text=True, timeout=30,
             creationflags=NOWIN, cwd=str(REPO),
         )
         if r.returncode == 0:
-            log(f"published URLs to gist ({GIST_RAW})")
+            log(f"published URLs to gist ({gist_raw})")
         else:
             log(f"gist publish failed: {r.stderr.strip()[:120]}")
         os.unlink(tf.name)
@@ -180,7 +200,7 @@ def publish(urls: dict) -> None:
     try:
         body = json.dumps(urls).encode("utf-8")
         req = urllib.request.Request(
-            "https://ntfy.sh/tether-lab-updates",
+            f"https://ntfy.sh/{relay['ntfy_topic']}",
             data=body, method="POST",
             headers={"Title": "tether", "Priority": "low",
                      "Content-Type": "application/json"},

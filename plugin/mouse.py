@@ -63,12 +63,26 @@ class MouseDriver:
             vw, vh = _virtual_screen_size()
             self._vsize = (vw, vh)
             self._vorigin = _virtual_screen_origin()
+            self._vsize_ts = time.monotonic()
         else:
             self._vsize = (0, 0)
             self._vorigin = (0, 0)
+            self._vsize_ts = 0.0
+
+    def _refresh_vsize(self) -> None:
+        """Re-query the virtual screen at most every 5 s — a monitor
+        plug/unplug or DPI change mid-session would otherwise leave the
+        clamping math on a dead geometry. Call with the lock held."""
+        if not _IS_WIN or not _HAVE_PINPUT:
+            return
+        if time.monotonic() - self._vsize_ts < 5.0:
+            return
+        self._vsize_ts = time.monotonic()
+        self._vsize = _virtual_screen_size()
+        self._vorigin = _virtual_screen_origin()
 
     # ------------------------------------------------------------------ pump
-    # Upstream (UDP/WS/relay) delivers deltas in bursts at whatever rate the
+    # Upstream (WS/relay) delivers deltas in bursts at whatever rate the
     # network allows. The pump drains that backlog at 60 Hz in small substeps,
     # so a chunky 250 ms relayed arrival still reads as smooth motion instead
     # of a jump.
@@ -84,9 +98,9 @@ class MouseDriver:
             self._last_event = time.monotonic()
 
     def _pump_loop(self) -> None:
-        while not self._pump_stop.is_set():
-            time.sleep(1.0 / 60.0)
+        while not self._pump_stop.wait(1.0 / 60.0):
             with self._lock:
+                self._refresh_vsize()
                 if self._paused:
                     self._pending_x = self._pending_y = 0.0
                     continue
@@ -172,6 +186,8 @@ class MouseDriver:
     def move(self, dx: float, dy: float) -> None:
         if not self._ctrl or not self._gate():
             return
+        with self._lock:
+            self._refresh_vsize()
         pos = self._ctrl.position
         if _IS_WIN:
             # pynput Windows: pixel coords in virtual-screen space; dx/dy are
@@ -211,17 +227,3 @@ class MouseDriver:
         if not self._ctrl or not self._gate():
             return
         self._ctrl.scroll(0, int(dy))
-
-    def aim(self, x: float, y: float) -> None:
-        """Absolute aim (laser-pointer mode): x/y in -1..1, (0,0) = screen center.
-        Treated like any active event: clears the idle-pause wedge."""
-        if not self._ctrl or not self._gate():
-            return
-        fx = (max(-1.0, min(1.0, x)) + 1.0) / 2.0
-        fy = (max(-1.0, min(1.0, y)) + 1.0) / 2.0
-        if _IS_WIN:
-            vw, vh = self._vsize or (1920, 1080)
-            ox, oy = self._vorigin
-            self._ctrl.position = (ox + fx * (vw - 1), oy + fy * (vh - 1))
-        else:
-            self._ctrl.position = (fx, fy)

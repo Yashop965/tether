@@ -67,7 +67,19 @@ def main() -> None:
     server.register_with_ctx(ctx)
     server.start()
 
+    import signal
     import time
+
+    def _shutdown(signum, frame):  # noqa: ARG001
+        print("shutting tether bridge…")
+        server.stop()
+        raise SystemExit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _shutdown)
+        except (ValueError, OSError):  # not main thread / no signal on platform
+            break
     while True:
         time.sleep(3600)
 

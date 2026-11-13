@@ -197,6 +197,4 @@ object AutoUpdater {
             runCatching { ctx.startActivity(fallback) }
         }
     }
-
-    fun reset() { state = "idle"; progress = -1; message = "" }
 }
