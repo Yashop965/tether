@@ -96,6 +96,11 @@ class TetherWs(private val host: String, private val port: Int, private val toke
                         "state" -> main.post {
                             events?.onPaused(org.json.JSONObject(text).optBoolean("paused"))
                         }
+                        "hello_ok" -> main.post {
+                            // server syncs the gate state at connect time; the
+                            // local chip must mirror the laptop exactly.
+                            events?.onPaused(org.json.JSONObject(text).optBoolean("paused"))
+                        }
                     }
                 } catch (_: Exception) { }
             }

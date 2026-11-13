@@ -141,6 +141,15 @@ class MouseDriver:
         with self._lock:
             self._last_event = time.monotonic()
 
+    def _was_wedged(self) -> bool:
+        """True just before an event would clear the idle auto-pause wedge."""
+        with self._lock:
+            return (
+                not self._paused
+                and bool(self.idle_seconds)
+                and time.monotonic() - self._last_event > self.idle_seconds
+            )
+
     # -- actions (no-op unless armed) ----------------------------------------
     def _gate(self) -> bool:
         """True iff the cursor may act on this event.
@@ -180,7 +189,13 @@ class MouseDriver:
             y = _clamp(float(pos[1]) + dy * self.sensitivity)
         self._ctrl.position = (x, y)
 
-    def click(self, button: str = "left") -> None:
+    def click(self, button: str = "left", swallow_wedge_clear: bool = False) -> None:
+        # The tap that merely wakes us from an idle wedge is a "tap to
+        # resume", not a click — swallow it one-shot so nobody gets phantom
+        # clicks right-clicking their way out of an idle pause.
+        if swallow_wedge_clear and self._was_wedged():
+            self.note_event()
+            return
         if not self._ctrl or not self._gate():
             return
         btn = {

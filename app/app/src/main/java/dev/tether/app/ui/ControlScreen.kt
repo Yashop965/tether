@@ -43,6 +43,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.tether.app.AppSignal
@@ -260,8 +261,8 @@ fun ControlScreen() {
         // --------------------------------------------------------- surface
         when {
             !up -> SurfaceFrame(Modifier.weight(1f)) { LinkPanel(Modifier, connErr, { scan = true }) { Prefs.save(ctx, it.first, it.second, it.third); wsVer++ } }
-            mode == "pad" -> SurfaceFrame(Modifier.weight(1f)) { PadSurface(ws, Modifier, up) }
-            mode == "tilt" -> SurfaceFrame(Modifier.weight(1f)) { TiltSurface(ws, Modifier) }
+            mode == "pad" -> SurfaceFrame(Modifier.weight(1f)) { PadSurface(ws, Modifier, up, paused) }
+            mode == "tilt" -> SurfaceFrame(Modifier.weight(1f)) { TiltSurface(ws, Modifier, paused) }
             else -> SurfaceFrame(Modifier.weight(1f)) { VoiceSurface(ws, Modifier, note, noteSent, up, proc) }
         }
 
@@ -529,7 +530,7 @@ private fun LkField(
 // ------------------------------------------------------------------- pad
 
 @Composable
-fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
+fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean, paused: Boolean = false) {
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -651,8 +652,15 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
                                     }
                                     val dt = ch[0].uptimeMillis - pressStart
                                     if (dt < 300L && !movedPastSlop) {
-                                        val b = if (maxActive >= 2) "right" else "left"
-                                        ws.send("""{"t":"click","b":"$b"}""")
+                                        when {
+                                            // PAUSED → the tap re-arms the cursor, it is
+                                            // NOT the TAP-TO-TARGET click.
+                                            paused -> ws.send(TetherWs.RESUME)
+                                            else -> {
+                                                val b = if (maxActive >= 2) "right" else "left"
+                                                ws.send("""{"t":"click","b":"$b"}""")
+                                            }
+                                        }
                                     }
                                     // touchpad glide: keep coasting at the smoothed
                                     // speed, decaying, like a finger lifting off a
@@ -704,8 +712,26 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
             },
         contentAlignment = Alignment.BottomCenter,
     ) {
+        // PAUSED (manual, sticky) → nothing moves/scrolls/clicks until re-armed.
+        // Say so on-surface; the tap below the overlay sends RESUME.
+        if (paused) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0x33000000))
+                    .align(Alignment.Center),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("PAUSED", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
+                    Text("tap anywhere to resume the cursor", color = Faint, fontSize = 11.sp, letterSpacing = 1.sp)
+                }
+            }
+        }
         Text(
-            if (!up) "NOT CONNECTED" else "drag · tap = click · 2 fingers = right / scroll",
+            if (!up) "NOT CONNECTED"
+            else if (paused) "cursor paused — tap to resume"
+            else "drag · tap = click · 2 fingers = right / scroll",
             color = Faint,
             fontSize = 10.sp,
             letterSpacing = 1.sp,
@@ -717,7 +743,7 @@ fun PadSurface(ws: TetherWs, modifier: Modifier, up: Boolean) {
 // ----------------------------------------------------------------- tilt
 
 @Composable
-fun TiltSurface(ws: TetherWs, modifier: Modifier) {
+fun TiltSurface(ws: TetherWs, modifier: Modifier, paused: Boolean = false) {
     val ctx = LocalContext.current
     // Laser / air-pen: on entering the surface we capture your "neutral" pose
     // (wherever you're standing, however you hold the phone). Tilt VELOCITY
@@ -837,8 +863,14 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
                                 if (active == 0) {
                                     val dt = ch[0].uptimeMillis - pressStart
                                     if (dt < 300L) {
-                                        val b = if (maxActive >= 2) "right" else "left"
-                                        ws.send("""{"t":"click","b":"$b"}""")
+                                        when {
+                                            // PAUSED → the tap exists to RE-ARM, not to click.
+                                            // (The server also swallows one click right
+                                            // after an idle wedge clears — belt & braces.)
+                                            paused -> ws.send(TetherWs.RESUME)
+                                            maxActive >= 2 -> ws.send("""{"t":"click","b":"right"}""")
+                                            else -> ws.send("""{"t":"click","b":"left"}""")
+                                        }
                                     }
                                     pressStart = 0L; maxActive = 0
                                 }
@@ -884,6 +916,22 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
                 )
             }
         }
+        // PAUSED (manual) → the cursor can't move, no matter what you wave.
+        // Make it OBVIOUS on every surface; tap re-arms instead of clicking.
+        if (paused) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0x33000000))
+                    .align(Alignment.Center),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("PAUSED", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
+                    Text("tap anywhere to resume the cursor", color = Faint, fontSize = 11.sp, letterSpacing = 1.sp)
+                }
+            }
+        }
         // re-calibrate chip — capture a new neutral pose wherever you are
         Box(
             modifier = Modifier
@@ -898,7 +946,8 @@ fun TiltSurface(ws: TetherWs, modifier: Modifier) {
         Text(
             when {
                 calibrating -> "hold still — capturing your neutral pose…"
-                else -> "move phone like a laser · tap = click · right-tap = right click"
+                paused -> "cursor paused — tap to resume"
+                else -> "wave the phone like a wand · tap = click · 2-finger tap = right click"
             },
             color = Faint,
             fontSize = 10.sp,
@@ -939,8 +988,15 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
                 intArrayOf(OutputFormat.MPEG_4, AudioEncoder.AAC, 44100, 128 * 1000),
                 intArrayOf(OutputFormat.DEFAULT, AudioEncoder.AMR_NB, 8000, 12 * 1000),
             )
-            for (cfg in cfgs) {
-                val (fmt, enc, rate, br) = cfg
+            val cfgNames = listOf("OGG/OPUS", "MPEG4/AAC", "AMR-NB")
+            // Some HALs (Exynos especially) accept a codec combo, start()
+            // fine, and then emit ZERO bytes — so a successful start is not
+            // proof of a working recorder. Try each combo until we actually
+            // SEE bytes land in the file within ~1.5 s.
+            var lastFail = ""
+            for (i in cfgs.indices) {
+                val (fmt, enc, rate, br) = cfgs[i]
+                file.delete()
                 try {
                     val r = if (Build.VERSION.SDK_INT >= 29) MediaRecorder(ctx)
                     else @Suppress("DEPRECATION") MediaRecorder()
@@ -957,12 +1013,25 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
                     }
                     recHolder.r = r
                     recHolder.start = SystemClock.elapsedRealtime()
-                    return@Thread
-                } catch (_: Exception) {
-                    // this codec combo failed on this HAL — try the next
+                    // watch for real byte flow
+                    Thread.sleep(1500)
+                    if (file.exists() && file.length() > 32) {
+                        lastFail = "codec ${cfgNames[i]} OK — ${file.length()}B in 1.5s"
+                        return@Thread
+                    }
+                    // silent codec: tear down and try the next combo
+                    lastFail = "$cfgNames[i] started but wrote 0 bytes"
+                    try { r.stop() } catch (_: Exception) {}
+                    r.release()
+                    recHolder.r = null
+                } catch (ex: Exception) {
+                    lastFail = "$cfgNames[i] ${ex.javaClass.simpleName}: ${ex.message}"
                 }
             }
-            main.post { busy = false; err = "mic could not start" }
+            main.post {
+                busy = false
+                err = "mic: $lastFail — tap to retry"
+            }
         }.start()
     }
 

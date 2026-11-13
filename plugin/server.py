@@ -500,6 +500,9 @@ class TetherServer:
                 "t": "hello_ok",
                 "port": self.port,
                 "token_ok": True,
+                # sync the cursor gate state so a re-opened app (or a second
+                # phone) immediately knows if the cursor is currently paused
+                "paused": self.mouse._paused,
             }))
             async for message in ws:
                 if isinstance(message, bytes):
@@ -523,7 +526,7 @@ class TetherServer:
         if kind == "pad":
             self.mouse.queue_move(float(msg.get("dx", 0.0)), float(msg.get("dy", 0.0)))
         elif kind == "click":
-            self.mouse.click(str(msg.get("b", "left")))
+            self.mouse.click(str(msg.get("b", "left")), swallow_wedge_clear=True)
         elif kind == "scroll":
             self.mouse.scroll(int(msg.get("dy", 0)))
         elif kind == "tilt":
@@ -539,10 +542,10 @@ class TetherServer:
             self.mouse.aim(float(msg.get("x", 0.0)), float(msg.get("y", 0.0)))
         elif kind == "pause":
             self.mouse.pause()
-            await self._send(ws, {"t": "state", "paused": True})
+            await self._broadcast({"t": "state", "paused": True})
         elif kind == "resume":
             self.mouse.resume()
-            await self._send(ws, {"t": "state", "paused": False})
+            await self._broadcast({"t": "state", "paused": False})
         elif kind == "state_req":
             await self._send(ws, {
                 "t": "state",
