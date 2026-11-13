@@ -26,6 +26,20 @@ class Transcriber:
                 logger.info("tether: whisper '%s' ready", self.model_size)
             return self._model
 
+    def warmup(self) -> None:
+        """Load the whisper model in the background so the FIRST voice note
+        isn't paying the 2-5 s model-load spike. Idempotent + fail-soft."""
+        import threading
+
+        def _load() -> None:
+            try:
+                self._get_model()
+                logger.info("tether: stt model preloaded")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("tether: stt warmup failed (%s) — will load on demand", exc)
+
+        threading.Thread(target=_load, name="tether-stt-warmup", daemon=True).start()
+
     def transcribe(self, audio: bytes) -> str:
         if not audio:
             return ""

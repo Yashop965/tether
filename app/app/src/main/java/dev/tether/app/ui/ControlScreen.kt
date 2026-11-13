@@ -308,13 +308,14 @@ fun ControlScreen() {
  *  host on port 8400 — same transport, no extra infra. */
 @Composable
 private fun UpdateRow(ctx: android.content.Context) {
-    // poll the updater's volatile state while a check/download is in flight
+    // poll the updater's volatile state ONLY while a check/download is in
+    // flight — when idle there is nothing to watch, so don't recompose
+    // forever on a 1.5 s timer.
     var tick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            if (AutoUpdater.state == "checking" || AutoUpdater.state == "downloading") {
-                tick++; delay(400)
-            } else delay(1500)
+    LaunchedEffect(AutoUpdater.state) {
+        while (AutoUpdater.state == "checking" || AutoUpdater.state == "downloading") {
+            tick++
+            delay(400)
         }
     }
     val host = Prefs.host(ctx)
@@ -1069,6 +1070,17 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
         onDispose { }
     }
 
+    // live recording duration — the "hold long enough" question answered
+    // in real time instead of by a post-hoc error
+    var secs by remember { mutableIntStateOf(0) }
+    LaunchedEffect(busy) {
+        secs = 0
+        while (busy) {
+            delay(1000)
+            if (busy) secs++
+        }
+    }
+
     // pulsing ring while recording
     val pulse = rememberInfiniteTransition()
     val ring by pulse.animateFloat(
@@ -1138,7 +1150,7 @@ fun VoiceSurface(ws: TetherWs, modifier: Modifier, note: String?, noteSent: Bool
                 when {
                     err != null -> err.orEmpty()
                     proc -> "PROCESSING…"
-                    busy -> "LISTENING… TAP TO SEND"
+                    busy -> "LISTENING… ${secs}s · TAP TO SEND"
                     !up -> "NOT CONNECTED"
                     else -> "TAP TO TALK"
                 },

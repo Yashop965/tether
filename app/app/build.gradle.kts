@@ -12,8 +12,8 @@ android {
         applicationId = "dev.tether.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "1.6.6"
+        versionCode = 20
+        versionName = "1.6.7"
     }
 
     buildTypes {

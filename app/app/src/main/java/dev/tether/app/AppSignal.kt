@@ -14,20 +14,6 @@ object AppSignal {
 
     val resumedTick: MutableIntState = mutableIntStateOf(0)
 
-    /** Parse `tether://pair?h=<host>&p=<port>&t=<token>` (also accepts full
-     *  host/port/token keys). Returns Triple or null if malformed. */
-    fun parsePairUri(uri: String): Triple<String, String, String>? {
-        val q = uri.substringAfter('?', "")
-        if (q.isEmpty()) return null
-        val params = q.split('&').associate {
-            it.substringBefore('=') to it.substringAfter('=', "")
-        }
-        val host = params["h"] ?: params["host"] ?: return null
-        val port = params["p"] ?: params["port"] ?: "8377"
-        val token = params["t"] ?: params["token"] ?: return null
-        return Triple(host, port, token)
-    }
-
     /** Full pair spec incl. optional hotspot credentials (`n=` ssid, `k=` psk)
      *  and optional remote cloud-tunnel URL (`r=` wss://…). A pair is valid if
      *  it carries a host (LAN/hotspot) or a remote tunnel URL. */

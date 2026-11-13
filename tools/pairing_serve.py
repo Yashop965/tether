@@ -77,6 +77,17 @@ def hotspot_ip() -> str | None:
     return None
 
 
+def _apk_version() -> str:
+    """Read the app version we're about to publish, so the pairing page can
+    show it (demo judges see the page and the app agree on a version)."""
+    try:
+        import json as _json
+        m = _json.loads((OUT / "tether.json").read_text(encoding="utf-8"))
+        return str(m.get("version_name", ""))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--token", default=None, help="bridge token (default: read from bridge config or env TETHER_TOKEN)")
@@ -96,6 +107,7 @@ def main() -> int:
         return 1
 
     OUT.mkdir(parents=True, exist_ok=True)
+    apk_ver = _apk_version()
     cards = []
     for i, host in enumerate(hosts):
         label = "TAILNET" if i == 0 and host.startswith("100.") else "LAN"
@@ -132,6 +144,8 @@ def main() -> int:
         display:flex; flex-direction:column; align-items:center; min-height:100vh; padding:48px 16px; }}
  h1 {{ font-size:15px; letter-spacing:6px; font-weight:600; margin:0 0 6px; }}
  .sub {{ color:#666; font-size:11px; letter-spacing:2px; margin-bottom:36px; }}
+ .badge {{ color:#333; font-size:9px; letter-spacing:2px; border:1px solid #2a2a2a;
+           border-radius:99px; padding:3px 10px; margin:0 0 26px; }}
  .card {{ background:#111; border:1px solid #2a2a2a; border-radius:14px; padding:22px 26px;
          display:flex; flex-direction:column; align-items:center; gap:12px; }}
  .card img {{ width:230px; height:230px; background:#fff; padding:10px; border-radius:8px; }}
@@ -143,6 +157,7 @@ def main() -> int:
 <body>
 <h1>TETHER</h1>
 <div class="sub">SCAN WITH THE PHONE'S TETHER APP &middot; SCAN QR</div>
+{('<div class="badge">APP v' + apk_ver + '</div>') if apk_ver else ''}
 <div class="row">
 {chr(10).join(f'''<div class="card">
  <div class="lbl">{label}</div>

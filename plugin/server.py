@@ -255,6 +255,7 @@ class TetherServer:
         """Start the laptop's Wi-Fi hotspot (UAC), print SSID/PSK, and refresh
         the pairing page so the phone's Tether app auto-joins Wi-Fi + bridge."""
         import secrets
+        import string
         import subprocess
 
         check = subprocess.run(
@@ -265,7 +266,11 @@ class TetherServer:
             return
 
         ssid = f"Tether-{secrets.token_hex(2).upper()}"
-        psk = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(10))
+        # stronger PSK (~62 bits vs 33) but still human-typeable: 12 chars from
+        # the full alnum set (WPA2-PSK allows any 8-63 printable ASCII, but the
+        # demo flow hands this to people — keep it free of -_@)
+        _ALNUM = string.ascii_letters + string.digits
+        psk = "".join(secrets.choice(_ALNUM) for _ in range(12))
         print(f"configuring hotspot SSID={ssid} — accept the UAC prompt(s) below")
 
         def netsh_admin(argv: list[str]) -> str:
@@ -373,9 +378,12 @@ class TetherServer:
                 logf.write_text("", encoding="utf-8")
             except OSError:
                 continue
+            # bind the log handle to a named var so it isn't left dangling
+            # (and so a second tunnel spawn in the same loop gets a fresh one)
+            fh = open(logf, "a", encoding="utf-8", errors="replace")
             subprocess.Popen(
                 [str(cfd), "tunnel", "--url", origin, "--no-autoupdate"],
-                stdout=open(logf, "a", encoding="utf-8", errors="replace"),
+                stdout=fh,
                 stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
@@ -399,6 +407,13 @@ class TetherServer:
             target=self._run_loop, name="tether-server", daemon=True,
         )
         self._thread.start()
+        # preload the whisper model in the background — first voice note
+        # shouldn't pay the 2-5 s model-load spike (and the demo won't
+        # stumble on it either)
+        try:
+            self.stt.warmup()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self._udp_socket = self._make_udp_socket()
         except OSError as exc:

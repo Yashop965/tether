@@ -24,6 +24,7 @@ REPO = Path(__file__).parent.parent
 CFD = Path(os.environ.get("CFD_PATH", r"C:\Users\yashs\tools\cloudflared.exe"))
 LOGDIR = REPO / "tools"
 STATE = LOGDIR / "tunnels.json"
+PIDSTATE = LOGDIR / ".cloudflared_pids.json"
 URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # never flash a console window
 
@@ -31,6 +32,41 @@ TARGETS = {
     "bridge": ("http://127.0.0.1:8377", LOGDIR / "cloudflared_bridge.log"),
     "upd": ("http://127.0.0.1:8400", LOGDIR / "cloudflared_upd.log"),
 }
+
+_cf_handles: list = []  # keep log-file handles; close ours on respawn
+
+
+def load_pids() -> dict:
+    try:
+        return json.loads(PIDSTATE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_pids(pids: dict) -> None:
+    try:
+        PIDSTATE.write_text(json.dumps(pids, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def kill_existing() -> None:
+    # ONLY our spawned tunnels — `taskkill /IM cloudflared` used to nuke
+    # every cloudflared on the box (the user's other tunnels died with it).
+    pids = load_pids()
+    for key, pid in list(pids.items()):
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                       capture_output=True, timeout=30, check=False, creationflags=NOWIN)
+        pids.pop(key, None)
+    # also close our leftover log handles from the previous run
+    for h in _cf_handles:
+        try:
+            h.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _cf_handles.clear()
+    save_pids(pids)
+    time.sleep(2)
 
 
 def log(msg: str) -> None:
@@ -41,14 +77,6 @@ def log(msg: str) -> None:
             f.write(line + "\n")
     except OSError:
         pass
-
-
-def kill_existing() -> None:
-    subprocess.run(
-        ["taskkill", "/IM", "cloudflared.exe", "/F"],
-        capture_output=True, timeout=30, creationflags=NOWIN,
-    )
-    time.sleep(2)
 
 
 def wait_url(path: Path, prev: str | None, timeout: int = 90) -> str | None:
@@ -80,16 +108,30 @@ def wait_url(path: Path, prev: str | None, timeout: int = 90) -> str | None:
 
 def spawn(key: str, url: str | None) -> str | None:
     """(Re)start cloudflared for TARGETS[key]; return the new quick-tunnel URL."""
+    global _cf_handles
     origin, logpath = TARGETS[key]
-    logpath.write_text("", encoding="utf-8")  # fresh log so we parse the new URL
-    subprocess.Popen(
+    # close our previous log handles, then fresh log so we parse the new URL
+    for h in _cf_handles:
+        try:
+            h.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _cf_handles = []
+    logpath.write_text("", encoding="utf-8")
+    logfh = open(logpath, "a", encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(
         [str(CFD), "tunnel", "--url", origin, "--no-autoupdate"],
-        stdout=open(logpath, "a", encoding="utf-8", errors="replace"),
+        stdout=logfh,
         stderr=subprocess.STDOUT,
         creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                        | getattr(subprocess, "CREATE_NO_WINDOW", 0)),
     )
-    log(f"spawned {key} -> {origin}")
+    _cf_handles.append(logfh)
+    # remember WHO we spawned so we never kill unrelated cloudflareds
+    pids = load_pids()
+    pids[key] = proc.pid
+    save_pids(pids)
+    log(f"spawned {key} -> {origin} (pid {proc.pid})")
     return wait_url(logpath, url)
 
 
@@ -184,10 +226,16 @@ def alive(origin: str, url: str) -> bool:
 
 
 def kill_for_origin(origin: str) -> None:
-    # taskkill can't match command lines — kill ALL cloudflared; the loop
-    # re-spawns whichever target is missing (both are on 127.0.0.1 anyway).
-    subprocess.run(["taskkill", "/IM", "cloudflared.exe", "/F"],
-                   capture_output=True, timeout=30, check=False, creationflags=NOWIN)
+    # Kill ONLY the cloudflared we spawned for this target (by recorded pid),
+    # never the whole process list — other tunnels on this box must survive.
+    pids = load_pids()
+    target = "bridge" if "8377" in origin else "upd"
+    pid = pids.get(target)
+    if pid:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                       capture_output=True, timeout=30, check=False, creationflags=NOWIN)
+        pids.pop(target, None)
+        save_pids(pids)
 
 
 def main() -> int:
@@ -197,14 +245,28 @@ def main() -> int:
     # singleton: never run two tunnel_guards (they fight over cloudflared)
     lock = REPO / "tools" / ".tunnel_guard.pid"
     me = os.getpid()
+
+    import atexit
+
+    def _release_lock() -> None:
+        try:
+            if lock.exists() and lock.read_text().strip() == str(me):
+                lock.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    atexit.register(_release_lock)
     try:
         if lock.exists():
             old = int(lock.read_text().strip() or "0")
             if old and old != me:
+                # confirm via command line — bare tasklist lies on PID reuse
                 chk = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {old}", "/NH"],
-                    capture_output=True, text=True, timeout=15, creationflags=NOWIN)
-                if "python" in chk.stdout.lower() or "Info:" not in chk.stdout:
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_Process -Filter 'ProcessId=" + str(old)
+                     + "') | Where-Object { $_.CommandLine -match 'tunnel_guard' } | Select-Object -First 1"],
+                    capture_output=True, text=True, timeout=25, creationflags=NOWIN)
+                if chk.stdout.strip():
                     log(f"another tunnel_guard (pid {old}) is running — exiting")
                     return 0
     except Exception:  # noqa: BLE001

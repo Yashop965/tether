@@ -43,16 +43,20 @@ def main() -> int:
     SERVE.mkdir(parents=True, exist_ok=True)
     dest = SERVE / "tether.apk"
     shutil.copy2(APK, dest)
-    data = dest.read_bytes()
+    # stream the hash — don't hold a 150 MB APK in RAM
+    h = hashlib.sha256()
+    with open(dest, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
     manifest = {
         "version_code": vc,
         "version_name": vn,
         "apk": "tether.apk",
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "size": len(data),
+        "sha256": h.hexdigest(),
+        "size": dest.stat().st_size,
     }
     (SERVE / "tether.json").write_text(json.dumps(manifest, indent=2))
-    print(f"published v{vn} (code {vc}, {len(data)//1024} KB) -> {SERVE}/")
+    print(f"published v{vn} (code {vc}, {manifest['size']//1024} KB) -> {SERVE}/")
     print(f"serving:  http://<host>:8400/tether.apk   (run: python -m http.server 8400 in {SERVE})")
     return 0
 

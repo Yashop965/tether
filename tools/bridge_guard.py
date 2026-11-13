@@ -61,27 +61,25 @@ def reap_strays(lg: logging.Logger) -> None:
     """Kill python processes from earlier guard runs that still hold the ports.
 
     Matches only the CHILD command lines (bridge + update server) — never the
-    guards themselves, whose paths also contain 'tether'."""
+    guards themselves, whose paths also contain 'tether'. Uses a CIM query
+    (in-process, fast) instead of `tasklist /v` which hangs on busy boxes."""
     try:
         out = subprocess.run(
-            ["tasklist", "/v", "/nh"],
-            capture_output=True, text=True, timeout=90,
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { "
+             "($_.CommandLine -match '_local_run|http.server') -and "
+             "($_.Name -match 'python') } | ForEach-Object { "
+             "$_.ProcessId.ToString() }"],
+            capture_output=True, text=True, timeout=45,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        pids = set()
-        for line in out.stdout.splitlines():
-            cols = line.split()
-            # tasklist /v columns: image PID session name session# mem ... description
-            if len(cols) < 3:
-                continue
-            if ("_local_run" in line or "http.server" in line) and "guard" not in line \
-                    and cols[0].lower().endswith((".exe", "python")) and cols[1].isdigit():
-                pids.add(int(cols[1]))
-        for pid in sorted(pids):
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                           capture_output=True, text=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            lg.info("reaped stray pid %s", pid)
+        for line in out.stdout.split():
+            if line.isdigit():
+                pid = int(line)
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, text=True,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                lg.info("reaped stray pid %s", pid)
     except Exception as exc:  # noqa: BLE001 - best effort
         lg.warning("reap failed: %s", exc)
 
