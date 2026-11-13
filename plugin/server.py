@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -399,7 +400,50 @@ class TetherServer:
         print("tunnels keep running in the background — rerun to get fresh URLs (they are ephemeral).")
 
     # ---------------------------------------------------------------- start
+    def _reap_standalone(self) -> None:
+        """Kill the guard's standalone bridge (plugin/_local_run.py on THIS
+        port) so the plugin — the only side that can inject voice notes
+        into a Hermes session — can own 8377 while hermes is up.
+
+        Exact command-line match (`_local_run` + `--port <port>`): never
+        touches the guard itself, http_serve, or any other process on the
+        port. bridge_guard passively backs off while the port is held, and
+        revives the standalone bridge automatically when hermes exits.
+        """
+        if os.name != "nt":
+            return
+        import subprocess as _sp
+
+        try:
+            match = ("Get-CimInstance Win32_Process | Where-Object { "
+                     "($_.CommandLine -match '_local_run') -and "
+                     "($_.CommandLine -match '" + "--port " + str(self.port) + "\\b') } | "
+                     "ForEach-Object { $_.ProcessId.ToString() }")
+            out = _sp.run(
+                ["powershell", "-NoProfile", "-Command", match],
+                capture_output=True, text=True, timeout=30,
+                creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+            )
+            for pid in out.stdout.split():
+                if pid.isdigit():
+                    _sp.run(["taskkill", "/F", "/PID", pid],
+                            capture_output=True, text=True,
+                            creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+                    logger.info("tether: reaped standalone bridge pid %s (plugin takes the port)", pid)
+        except Exception:  # noqa: BLE001
+            logger.warning("tether: standalone reap failed", exc_info=True)
+
     def start(self) -> None:
+        # preemptive takeover: only if the guard's standalone bridge actually
+        # holds the port (probe first — a clean start skips the CIM query)
+        import socket as _sock
+        probe = _sock.socket()
+        try:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", self.port)) == 0:
+                self._reap_standalone()
+        finally:
+            probe.close()
         self._thread = threading.Thread(
             target=self._run_loop, name="tether-server", daemon=True,
         )
@@ -430,9 +474,20 @@ class TetherServer:
             import websockets
 
             async def _serve() -> None:
-                # websockets>=13 builds the server inside the running loop
-                async with websockets.serve(self._handle, self.host, self.port):
-                    await asyncio.Future()  # run until the process dies
+                # websockets>=13 builds the server inside the running loop.
+                # Retry on a busy port: bridge_guard may respawn the
+                # standalone bridge in the window between our reap and bind.
+                for attempt in range(15):
+                    try:
+                        async with websockets.serve(self._handle, self.host, self.port):
+                            await asyncio.Future()  # run until the process dies
+                            return
+                    except OSError:
+                        if attempt == 14:
+                            raise
+                        logger.warning("tether: port busy (attempt %d) — reaping standalone bridge, retry in 2s", attempt + 1)
+                        self._reap_standalone()
+                        await asyncio.sleep(2)
 
             self._loop.run_until_complete(_serve())
         except Exception:
