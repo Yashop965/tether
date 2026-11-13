@@ -114,18 +114,34 @@ def main() -> int:
     lg.info("=== bridge_guard start (python=%s) ===", PYTHON)
     # singleton: a second bridge_guard would fight the first over ports 8377/8400
     lock = REPO / "tools" / ".bridge_guard.pid"
+
+    def _release_lock() -> None:
+        # never leave a stale lock behind — Windows recycles PIDs fast and a
+        # name-only check against a reused pid would scare off the next guard
+        try:
+            if lock.exists() and lock.read_text().strip() == str(os.getpid()):
+                lock.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    import atexit
+    atexit.register(_release_lock)
     me = os.getpid()
     try:
         if lock.exists():
             old = int(lock.read_text().strip() or "0")
             if old and old != me:
+                # PID reuse makes name-only checks lie: confirm the OLD pid
+                # is actually a live bridge_guard (command line check).
                 chk = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {old}", "/NH"],
-                    capture_output=True, text=True, timeout=15,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                if "python" in chk.stdout.lower() or "Info:" not in chk.stdout:
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_Process -Filter 'ProcessId=" + str(old)
+                     + "') | Where-Object { $_.CommandLine -match 'bridge_guard' } | Select-Object -First 1"],
+                    capture_output=True, text=True, timeout=25)
+                if chk.stdout.strip():
                     lg.info("another bridge_guard (pid %d) is running — exiting", old)
                     return 0
+                lg.info("stale guard lock (pid %d gone) — taking over", old)
     except Exception:  # noqa: BLE001
         lg.warning("singleton check failed — continuing")
     lock.write_text(str(me))
